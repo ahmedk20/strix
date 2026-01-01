@@ -151,6 +151,9 @@ strix --target https://github.com/org/repo
 
 # Black-box web application assessment
 strix --target https://your-app.com
+
+# Resume an interrupted scan
+strix --target https://your-app.com --run-name my-scan --resume
 ```
 
 ### Advanced Testing Scenarios
