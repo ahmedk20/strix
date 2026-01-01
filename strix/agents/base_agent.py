@@ -216,9 +216,12 @@ class BaseAgent(metaclass=AgentMeta):
                         run_dir = tracer_instance.get_run_dir()
                         scan_config = tracer_instance.scan_config or {}
                         save_checkpoint(run_dir, self.state, scan_config)
-                except Exception:
-                    # Checkpoint save failure should not crash scan
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Checkpoint save failed (non-fatal): %s",
+                        exc,
+                        exc_info=True,
+                    )
 
                 if should_finish:
                     if self.non_interactive:

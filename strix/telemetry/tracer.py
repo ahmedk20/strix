@@ -216,8 +216,10 @@ class Tracer:
 
                         delete_checkpoint(run_dir)
                         logger.info("Deleted checkpoint after successful scan completion")
-                    except Exception:
-                        pass  # Checkpoint cleanup failure is not critical
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "Checkpoint cleanup failed (non-fatal)"
+                        )  # Checkpoint cleanup failure is not critical
 
             if self.final_scan_result:
                 penetration_test_report_file = run_dir / "penetration_test_report.md"

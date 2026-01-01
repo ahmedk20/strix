@@ -9,7 +9,8 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,6 @@ CHECKPOINT_VERSION = 1
 
 class CheckpointError(Exception):
     """Raised when checkpoint operations fail."""
-
-    pass
 
 
 def get_checkpoint_path(run_dir: Path) -> Path:
@@ -40,7 +39,7 @@ def save_checkpoint(
     run_dir: Path,
     agent_state: Any,  # AgentState from state.py
     scan_config: dict[str, Any],
-    tracer_data: Optional[dict[str, Any]] = None,
+    tracer_data: dict[str, Any] | None = None,
 ) -> None:
     """
     Save checkpoint for resumption.
@@ -63,7 +62,9 @@ def save_checkpoint(
             "version": CHECKPOINT_VERSION,
             "created_at": datetime.now(UTC).isoformat(),
             "scan_config": scan_config,
-            "agent_state": agent_state.model_dump(mode='json'),  # Pydantic serialization with JSON mode
+            "agent_state": agent_state.model_dump(
+                mode="json"
+            ),  # Pydantic serialization with JSON mode
             "tracer_data": tracer_data or {},
         }
 
@@ -77,12 +78,12 @@ def save_checkpoint(
 
         logger.info(f"Saved checkpoint at iteration {agent_state.iteration}")
 
-    except (OSError, RuntimeError, TypeError, ValueError) as e:
+    except (OSError, RuntimeError, TypeError, ValueError):
         # Match tracer.py error handling pattern
-        logger.exception(f"Failed to save checkpoint: {e}")
+        logger.exception("Failed to save checkpoint")
 
 
-def load_checkpoint(run_dir: Path) -> Optional[dict[str, Any]]:
+def load_checkpoint(run_dir: Path) -> dict[str, Any] | None:
     """
     Load checkpoint for resumption.
 
@@ -123,11 +124,12 @@ def load_checkpoint(run_dir: Path) -> Optional[dict[str, Any]]:
             return None
 
         logger.info("Loaded valid checkpoint")
-        return checkpoint
 
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.exception(f"Failed to load checkpoint: {e}")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        logger.exception("Failed to load checkpoint")
         return None
+    else:
+        return checkpoint
 
 
 def can_resume(run_dir: Path, current_scan_config: dict[str, Any]) -> bool:

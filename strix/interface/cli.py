@@ -17,7 +17,7 @@ from strix.telemetry.tracer import Tracer, set_global_tracer
 from .utils import build_final_stats_text, build_live_stats_text, get_severity_color
 
 
-async def run_cli(args: Any) -> None:  # noqa: PLR0915
+async def run_cli(args: Any) -> None:  # noqa: PLR0915, PLR0912
     console = Console()
 
     start_text = Text()
