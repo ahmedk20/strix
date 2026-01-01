@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "created_at": "2026-01-01T03:34:40.485477+00:00",
+  "scan_config": {
+    "scan_id": "manual-test",
+    "targets": [
+      {
+        "type": "web_application",
+        "details": {
+          "target_url": "https://example.com"
+        },
+        "original": "https://example.com"
+      }
+    ],
+    "user_instructions": "Test instructions",
+    "run_name": "manual-test"
+  },
+  "agent_state": {
+    "agent_id": "agent_cca8332b",
+    "agent_name": "ManualTestAgent",
+    "parent_id": null,
+    "sandbox_id": null,
+    "sandbox_token": null,
+    "sandbox_info": null,
+    "task": "Manual checkpoint test",
+    "iteration": 25,
+    "max_iterations": 300,
+    "completed": false,
+    "stop_requested": false,
+    "waiting_for_input": false,
+    "llm_failed": false,
+    "waiting_start_time": null,
+    "final_result": null,
+    "max_iterations_warning_sent": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Test message 1"
+      },
+      {
+        "role": "assistant",
+        "content": "Test response 1"
+      }
+    ],
+    "context": {},
+    "start_time": "2026-01-01T03:34:40.485430+00:00",
+    "last_updated": "2026-01-01T03:34:40.485470+00:00",
+    "actions_taken": [],
+    "observations": [],
+    "errors": []
+  },
+  "tracer_data": {}
+}
