@@ -21,7 +21,6 @@
 
 <a href="https://trendshift.io/repositories/15362" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15362" alt="usestrix%2Fstrix | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
-
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/usestrix/strix)
 
 </div>
@@ -34,8 +33,7 @@
 
 <br>
 
-> [!TIP]
-> **New!** Strix now integrates seamlessly with GitHub Actions and CI/CD pipelines. Automatically scan for vulnerabilities on every pull request and block insecure code before it reaches production!
+> [!TIP] > **New!** Strix now integrates seamlessly with GitHub Actions and CI/CD pipelines. Automatically scan for vulnerabilities on every pull request and block insecure code before it reaches production!
 
 ---
 
@@ -51,7 +49,6 @@ Strix are autonomous AI agents that act just like real hackers - they run your c
 - 💻 **Developer‑first** CLI with actionable reports
 - 🔄 **Auto‑fix & reporting** to accelerate remediation
 
-
 ## 🎯 Use Cases
 
 - **Application Security Testing** - Detect and validate critical vulnerabilities in your applications
@@ -64,6 +61,7 @@ Strix are autonomous AI agents that act just like real hackers - they run your c
 ## 🚀 Quick Start
 
 **Prerequisites:**
+
 - Docker (running)
 - An LLM provider key (e.g. [get OpenAI API key](https://platform.openai.com/api-keys) or use a local LLM)
 
@@ -153,6 +151,12 @@ strix --target https://github.com/org/repo
 strix --target https://your-app.com
 ```
 
+# Resume an interrupted scan
+
+strix --target https://your-app.com --run-name my-scan --resume
+
+````
+
 ### Advanced Testing Scenarios
 
 ```bash
@@ -167,7 +171,7 @@ strix --target api.your-app.com --instruction "Focus on business logic flaws and
 
 # Provide detailed instructions through file (e.g., rules of engagement, scope, exclusions)
 strix --target api.your-app.com --instruction-file ./instruction.md
-```
+````
 
 ### 🤖 Headless Mode
 
@@ -228,10 +232,10 @@ Have questions? Found a bug? Want to contribute? **[Join our Discord!](https://d
 ## 🌟 Support the Project
 
 **Love Strix?** Give us a ⭐ on GitHub!
+
 ## 🙏 Acknowledgements
 
 Strix builds on the incredible work of open-source projects like [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [ProjectDiscovery](https://github.com/projectdiscovery), [Playwright](https://github.com/microsoft/playwright), and [Textual](https://github.com/Textualize/textual). Huge thanks to their maintainers!
-
 
 > [!WARNING]
 > Only test apps you own or have permission to test. You are responsible for using Strix ethically and legally.
