@@ -12,7 +12,6 @@
 
 [![Python](https://img.shields.io/pypi/pyversions/strix-agent?color=3776AB)](https://pypi.org/project/strix-agent/)
 [![PyPI](https://img.shields.io/pypi/v/strix-agent?color=10b981)](https://pypi.org/project/strix-agent/)
-![PyPI Downloads](https://static.pepy.tech/personalized-badge/strix-agent?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=RED&left_text=Downloads)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 [![GitHub Stars](https://img.shields.io/github/stars/usestrix/strix)](https://github.com/usestrix/strix)
@@ -151,12 +150,6 @@ strix --target https://github.com/org/repo
 strix --target https://your-app.com
 ```
 
-# Resume an interrupted scan
-
-strix --target https://your-app.com --run-name my-scan --resume
-
-````
-
 ### Advanced Testing Scenarios
 
 ```bash
@@ -171,7 +164,10 @@ strix --target api.your-app.com --instruction "Focus on business logic flaws and
 
 # Provide detailed instructions through file (e.g., rules of engagement, scope, exclusions)
 strix --target api.your-app.com --instruction-file ./instruction.md
-````
+
+# Resume an interrupted scan
+strix --target https://your-app.com --run-name my-scan --resume
+```
 
 ### 🤖 Headless Mode
 
