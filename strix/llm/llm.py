@@ -1,8 +1,9 @@
+import asyncio
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from jinja2 import (
     FileSystemLoader,
     select_autoescape,
 )
-from litellm import ModelResponse, completion_cost
+from litellm import completion_cost, stream_chunk_builder, supports_reasoning
 from litellm.utils import supports_prompt_caching, supports_vision
 
 from strix.llm.config import LLMConfig
@@ -21,6 +22,23 @@ from strix.llm.request_queue import get_global_queue
 from strix.llm.utils import _truncate_to_first_function, parse_tool_invocations
 from strix.prompts import load_prompt_modules
 from strix.tools import get_tools_prompt
+
+
+MAX_RETRIES = 5
+RETRY_MULTIPLIER = 8
+RETRY_MIN = 8
+RETRY_MAX = 64
+
+
+def _should_retry(exception: Exception) -> bool:
+    status_code = None
+    if hasattr(exception, "status_code"):
+        status_code = exception.status_code
+    elif hasattr(exception, "response") and hasattr(exception.response, "status_code"):
+        status_code = exception.response.status_code
+    if status_code is not None:
+        return bool(litellm._should_retry(status_code))
+    return True
 
 
 logger = logging.getLogger(__name__)
@@ -42,57 +60,6 @@ class LLMRequestFailedError(Exception):
         super().__init__(message)
         self.message = message
         self.details = details
-
-
-SUPPORTS_STOP_WORDS_FALSE_PATTERNS: list[str] = [
-    "o1*",
-    "grok-4-0709",
-    "grok-code-fast-1",
-    "deepseek-r1-0528*",
-]
-
-REASONING_EFFORT_PATTERNS: list[str] = [
-    "o1-2024-12-17",
-    "o1",
-    "o3",
-    "o3-2025-04-16",
-    "o3-mini-2025-01-31",
-    "o3-mini",
-    "o4-mini",
-    "o4-mini-2025-04-16",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gpt-5*",
-    "deepseek-r1-0528*",
-    "claude-sonnet-4-5*",
-    "claude-haiku-4-5*",
-]
-
-
-def normalize_model_name(model: str) -> str:
-    raw = (model or "").strip().lower()
-    if "/" in raw:
-        name = raw.split("/")[-1]
-        if ":" in name:
-            name = name.split(":", 1)[0]
-    else:
-        name = raw
-    if name.endswith("-gguf"):
-        name = name[: -len("-gguf")]
-    return name
-
-
-def model_matches(model: str, patterns: list[str]) -> bool:
-    raw = (model or "").strip().lower()
-    name = normalize_model_name(model)
-    for pat in patterns:
-        pat_l = pat.lower()
-        if "/" in pat_l:
-            if fnmatch(raw, pat_l):
-                return True
-        elif fnmatch(name, pat_l):
-            return True
-    return False
 
 
 class StepRole(str, Enum):
@@ -271,12 +238,7 @@ class LLM:
 
         return cached_messages
 
-    async def generate(  # noqa: PLR0912, PLR0915
-        self,
-        conversation_history: list[dict[str, Any]],
-        scan_id: str | None = None,
-        step_number: int = 1,
-    ) -> LLMResponse:
+    def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         messages = [{"role": "system", "content": self.system_prompt}]
 
         identity_message = self._build_identity_message()
@@ -289,80 +251,110 @@ class LLM:
         conversation_history.extend(compressed_history)
         messages.extend(compressed_history)
 
-        cached_messages = self._prepare_cached_messages(messages)
+        return self._prepare_cached_messages(messages)
 
-        try:
-            response = await self._make_request(cached_messages)
-            self._update_usage_stats(response)
+    async def _stream_and_accumulate(
+        self,
+        messages: list[dict[str, Any]],
+        scan_id: str | None,
+        step_number: int,
+    ) -> AsyncIterator[LLMResponse]:
+        accumulated_content = ""
+        chunks: list[Any] = []
 
-            content = ""
-            if (
-                response.choices
-                and hasattr(response.choices[0], "message")
-                and response.choices[0].message
-            ):
-                content = getattr(response.choices[0].message, "content", "") or ""
+        async for chunk in self._stream_request(messages):
+            chunks.append(chunk)
+            delta = self._extract_chunk_delta(chunk)
+            if delta:
+                accumulated_content += delta
 
-            content = _truncate_to_first_function(content)
+                if "</function>" in accumulated_content:
+                    function_end = accumulated_content.find("</function>") + len("</function>")
+                    accumulated_content = accumulated_content[:function_end]
 
-            if "</function>" in content:
-                function_end_index = content.find("</function>") + len("</function>")
-                content = content[:function_end_index]
+                yield LLMResponse(
+                    scan_id=scan_id,
+                    step_number=step_number,
+                    role=StepRole.AGENT,
+                    content=accumulated_content,
+                    tool_invocations=None,
+                )
 
-            tool_invocations = parse_tool_invocations(content)
+        if chunks:
+            complete_response = stream_chunk_builder(chunks)
+            self._update_usage_stats(complete_response)
 
-            return LLMResponse(
-                scan_id=scan_id,
-                step_number=step_number,
-                role=StepRole.AGENT,
-                content=content,
-                tool_invocations=tool_invocations if tool_invocations else None,
-            )
+        accumulated_content = _truncate_to_first_function(accumulated_content)
+        if "</function>" in accumulated_content:
+            function_end = accumulated_content.find("</function>") + len("</function>")
+            accumulated_content = accumulated_content[:function_end]
 
-        except litellm.RateLimitError as e:
-            raise LLMRequestFailedError("LLM request failed: Rate limit exceeded", str(e)) from e
-        except litellm.AuthenticationError as e:
-            raise LLMRequestFailedError("LLM request failed: Invalid API key", str(e)) from e
-        except litellm.NotFoundError as e:
-            raise LLMRequestFailedError("LLM request failed: Model not found", str(e)) from e
-        except litellm.ContextWindowExceededError as e:
-            raise LLMRequestFailedError("LLM request failed: Context too long", str(e)) from e
-        except litellm.ContentPolicyViolationError as e:
-            raise LLMRequestFailedError(
-                "LLM request failed: Content policy violation", str(e)
-            ) from e
-        except litellm.ServiceUnavailableError as e:
-            raise LLMRequestFailedError("LLM request failed: Service unavailable", str(e)) from e
-        except litellm.Timeout as e:
-            raise LLMRequestFailedError("LLM request failed: Request timed out", str(e)) from e
-        except litellm.UnprocessableEntityError as e:
-            raise LLMRequestFailedError("LLM request failed: Unprocessable entity", str(e)) from e
-        except litellm.InternalServerError as e:
-            raise LLMRequestFailedError("LLM request failed: Internal server error", str(e)) from e
-        except litellm.APIConnectionError as e:
-            raise LLMRequestFailedError("LLM request failed: Connection error", str(e)) from e
-        except litellm.UnsupportedParamsError as e:
-            raise LLMRequestFailedError("LLM request failed: Unsupported parameters", str(e)) from e
-        except litellm.BudgetExceededError as e:
-            raise LLMRequestFailedError("LLM request failed: Budget exceeded", str(e)) from e
-        except litellm.APIResponseValidationError as e:
-            raise LLMRequestFailedError(
-                "LLM request failed: Response validation error", str(e)
-            ) from e
-        except litellm.JSONSchemaValidationError as e:
-            raise LLMRequestFailedError(
-                "LLM request failed: JSON schema validation error", str(e)
-            ) from e
-        except litellm.InvalidRequestError as e:
-            raise LLMRequestFailedError("LLM request failed: Invalid request", str(e)) from e
-        except litellm.BadRequestError as e:
-            raise LLMRequestFailedError("LLM request failed: Bad request", str(e)) from e
-        except litellm.APIError as e:
-            raise LLMRequestFailedError("LLM request failed: API error", str(e)) from e
-        except litellm.OpenAIError as e:
-            raise LLMRequestFailedError("LLM request failed: OpenAI error", str(e)) from e
-        except Exception as e:
-            raise LLMRequestFailedError(f"LLM request failed: {type(e).__name__}", str(e)) from e
+        tool_invocations = parse_tool_invocations(accumulated_content)
+
+        yield LLMResponse(
+            scan_id=scan_id,
+            step_number=step_number,
+            role=StepRole.AGENT,
+            content=accumulated_content,
+            tool_invocations=tool_invocations if tool_invocations else None,
+        )
+
+    def _raise_llm_error(self, e: Exception) -> None:
+        error_map: list[tuple[type, str]] = [
+            (litellm.RateLimitError, "Rate limit exceeded"),
+            (litellm.AuthenticationError, "Invalid API key"),
+            (litellm.NotFoundError, "Model not found"),
+            (litellm.ContextWindowExceededError, "Context too long"),
+            (litellm.ContentPolicyViolationError, "Content policy violation"),
+            (litellm.ServiceUnavailableError, "Service unavailable"),
+            (litellm.Timeout, "Request timed out"),
+            (litellm.UnprocessableEntityError, "Unprocessable entity"),
+            (litellm.InternalServerError, "Internal server error"),
+            (litellm.APIConnectionError, "Connection error"),
+            (litellm.UnsupportedParamsError, "Unsupported parameters"),
+            (litellm.BudgetExceededError, "Budget exceeded"),
+            (litellm.APIResponseValidationError, "Response validation error"),
+            (litellm.JSONSchemaValidationError, "JSON schema validation error"),
+            (litellm.InvalidRequestError, "Invalid request"),
+            (litellm.BadRequestError, "Bad request"),
+            (litellm.APIError, "API error"),
+            (litellm.OpenAIError, "OpenAI error"),
+        ]
+        for error_type, message in error_map:
+            if isinstance(e, error_type):
+                raise LLMRequestFailedError(f"LLM request failed: {message}", str(e)) from e
+        raise LLMRequestFailedError(f"LLM request failed: {type(e).__name__}", str(e)) from e
+
+    async def generate(
+        self,
+        conversation_history: list[dict[str, Any]],
+        scan_id: str | None = None,
+        step_number: int = 1,
+    ) -> AsyncIterator[LLMResponse]:
+        messages = self._prepare_messages(conversation_history)
+
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                async for response in self._stream_and_accumulate(messages, scan_id, step_number):
+                    yield response
+                return  # noqa: TRY300
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                if not _should_retry(e) or attempt == MAX_RETRIES - 1:
+                    break
+                wait_time = min(RETRY_MAX, RETRY_MULTIPLIER * (2**attempt))
+                wait_time = max(RETRY_MIN, wait_time)
+                await asyncio.sleep(wait_time)
+
+        if last_error:
+            self._raise_llm_error(last_error)
+
+    def _extract_chunk_delta(self, chunk: Any) -> str:
+        if chunk.choices and hasattr(chunk.choices[0], "delta"):
+            delta = chunk.choices[0].delta
+            return getattr(delta, "content", "") or ""
+        return ""
 
     @property
     def usage_stats(self) -> dict[str, dict[str, int | float]]:
@@ -377,17 +369,13 @@ class LLM:
             "supported": supports_prompt_caching(self.config.model_name),
         }
 
-    def _should_include_stop_param(self) -> bool:
-        if not self.config.model_name:
-            return True
-
-        return not model_matches(self.config.model_name, SUPPORTS_STOP_WORDS_FALSE_PATTERNS)
-
     def _should_include_reasoning_effort(self) -> bool:
         if not self.config.model_name:
             return False
-
-        return model_matches(self.config.model_name, REASONING_EFFORT_PATTERNS)
+        try:
+            return bool(supports_reasoning(model=self.config.model_name))
+        except Exception:  # noqa: BLE001
+            return False
 
     def _model_supports_vision(self) -> bool:
         if not self.config.model_name:
@@ -436,10 +424,10 @@ class LLM:
             filtered_messages.append(updated_msg)
         return filtered_messages
 
-    async def _make_request(
+    async def _stream_request(
         self,
         messages: list[dict[str, Any]],
-    ) -> ModelResponse:
+    ) -> AsyncIterator[Any]:
         if not self._model_supports_vision():
             messages = self._filter_images_from_messages(messages)
 
@@ -447,6 +435,7 @@ class LLM:
             "model": self.config.model_name,
             "messages": messages,
             "timeout": self.config.timeout,
+            "stream_options": {"include_usage": True},
         }
 
         if _LLM_API_KEY:
@@ -454,21 +443,19 @@ class LLM:
         if _LLM_API_BASE:
             completion_args["api_base"] = _LLM_API_BASE
 
-        if self._should_include_stop_param():
-            completion_args["stop"] = ["</function>"]
+        completion_args["stop"] = ["</function>"]
 
         if self._should_include_reasoning_effort():
             completion_args["reasoning_effort"] = "high"
 
         queue = get_global_queue()
-        response = await queue.make_request(completion_args)
-
         self._total_stats.requests += 1
         self._last_request_stats = RequestStats(requests=1)
 
-        return response
+        async for chunk in queue.stream_request(completion_args):
+            yield chunk
 
-    def _update_usage_stats(self, response: ModelResponse) -> None:
+    def _update_usage_stats(self, response: Any) -> None:
         try:
             if hasattr(response, "usage") and response.usage:
                 input_tokens = getattr(response.usage, "prompt_tokens", 0)

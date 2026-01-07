@@ -1,29 +1,12 @@
 import asyncio
-import logging
 import os
 import threading
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
-import litellm
-from litellm import ModelResponse, completion
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
-
-
-logger = logging.getLogger(__name__)
-
-
-def should_retry_exception(exception: Exception) -> bool:
-    status_code = None
-
-    if hasattr(exception, "status_code"):
-        status_code = exception.status_code
-    elif hasattr(exception, "response") and hasattr(exception.response, "status_code"):
-        status_code = exception.response.status_code
-
-    if status_code is not None:
-        return bool(litellm._should_retry(status_code))
-    return True
+from litellm import acompletion
+from litellm.types.utils import ModelResponseStream
 
 
 class LLMRequestQueue:
@@ -42,7 +25,9 @@ class LLMRequestQueue:
         self._last_request_time = 0.0
         self._lock = threading.Lock()
 
-    async def make_request(self, completion_args: dict[str, Any]) -> ModelResponse:
+    async def stream_request(
+        self, completion_args: dict[str, Any]
+    ) -> AsyncIterator[ModelResponseStream]:
         try:
             while not self._semaphore.acquire(timeout=0.2):
                 await asyncio.sleep(0.1)
@@ -56,25 +41,18 @@ class LLMRequestQueue:
             if sleep_needed > 0:
                 await asyncio.sleep(sleep_needed)
 
-            return await self._reliable_request(completion_args)
+            async for chunk in self._stream_request(completion_args):
+                yield chunk
         finally:
             self._semaphore.release()
 
-    @retry(  # type: ignore[misc]
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=8, min=8, max=64),
-        retry=retry_if_exception(should_retry_exception),
-        reraise=True,
-    )
-    async def _reliable_request(self, completion_args: dict[str, Any]) -> ModelResponse:
-        response = completion(**completion_args, stream=False)
-        if isinstance(response, ModelResponse):
-            return response
-        self._raise_unexpected_response()
-        raise RuntimeError("Unreachable code")
+    async def _stream_request(
+        self, completion_args: dict[str, Any]
+    ) -> AsyncIterator[ModelResponseStream]:
+        response = await acompletion(**completion_args, stream=True)
 
-    def _raise_unexpected_response(self) -> None:
-        raise RuntimeError("Unexpected response type")
+        async for chunk in response:
+            yield chunk
 
 
 _global_queue: LLMRequestQueue | None = None

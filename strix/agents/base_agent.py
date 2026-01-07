@@ -148,7 +148,7 @@ class BaseAgent(metaclass=AgentMeta):
     def cancel_current_execution(self) -> None:
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
-            self._current_task = None
+        self._current_task = None
 
     async def agent_loop(self, task: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
         await self._initialize_sandbox_and_state(task)
@@ -204,7 +204,11 @@ class BaseAgent(metaclass=AgentMeta):
                 self.state.add_message("user", final_warning_msg)
 
             try:
-                should_finish = await self._process_iteration(tracer)
+                iteration_task = asyncio.create_task(self._process_iteration(tracer))
+                self._current_task = iteration_task
+                should_finish = await iteration_task
+                self._current_task = None
+
                 if should_finish:
                     if self.non_interactive:
                         self.state.set_completed({"success": True})
@@ -215,6 +219,13 @@ class BaseAgent(metaclass=AgentMeta):
                     continue
 
             except asyncio.CancelledError:
+                self._current_task = None
+                if tracer:
+                    partial_content = tracer.finalize_streaming_as_interrupted(self.state.agent_id)
+                    if partial_content and partial_content.strip():
+                        self.state.add_message(
+                            "assistant", f"{partial_content}\n\n[ABORTED BY USER]"
+                        )
                 if self.non_interactive:
                     raise
                 await self._enter_waiting_state(tracer, error_occurred=False, was_cancelled=True)
@@ -351,9 +362,16 @@ class BaseAgent(metaclass=AgentMeta):
         self.state.add_message("user", task)
 
     async def _process_iteration(self, tracer: Optional["Tracer"]) -> bool:
-        response = await self.llm.generate(self.state.get_conversation_history())
+        final_response = None
+        async for response in self.llm.generate(self.state.get_conversation_history()):
+            final_response = response
+            if tracer and response.content:
+                tracer.update_streaming_content(self.state.agent_id, response.content)
 
-        content_stripped = (response.content or "").strip()
+        if final_response is None:
+            return False
+
+        content_stripped = (final_response.content or "").strip()
 
         if not content_stripped:
             corrective_message = (
@@ -369,17 +387,18 @@ class BaseAgent(metaclass=AgentMeta):
             self.state.add_message("user", corrective_message)
             return False
 
-        self.state.add_message("assistant", response.content)
+        self.state.add_message("assistant", final_response.content)
         if tracer:
+            tracer.clear_streaming_content(self.state.agent_id)
             tracer.log_chat_message(
-                content=clean_content(response.content),
+                content=clean_content(final_response.content),
                 role="assistant",
                 agent_id=self.state.agent_id,
             )
 
         actions = (
-            response.tool_invocations
-            if hasattr(response, "tool_invocations") and response.tool_invocations
+            final_response.tool_invocations
+            if hasattr(final_response, "tool_invocations") and final_response.tool_invocations
             else []
         )
 

@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 
 if TYPE_CHECKING:
@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 from rich.align import Align
 from rich.console import Group
-from rich.markup import escape as rich_escape
 from rich.panel import Panel
+from rich.spinner import SPINNERS
 from rich.style import Style
 from rich.text import Text
 from textual import events, on
@@ -36,10 +36,6 @@ from strix.llm.config import LLMConfig
 from strix.telemetry.tracer import Tracer, set_global_tracer
 
 
-def escape_markup(text: str) -> str:
-    return cast("str", rich_escape(text))
-
-
 def get_package_version() -> str:
     try:
         return pkg_version("strix-agent")
@@ -55,7 +51,15 @@ class ChatTextArea(TextArea):  # type: ignore[misc]
     def set_app_reference(self, app: "StrixTUIApp") -> None:
         self._app_reference = app
 
+    def on_mount(self) -> None:
+        self._update_height()
+
     def _on_key(self, event: events.Key) -> None:
+        if event.key == "shift+enter":
+            self.insert("\n")
+            event.prevent_default()
+            return
+
         if event.key == "enter" and self._app_reference:
             text_content = str(self.text)  # type: ignore[has-type]
             message = text_content.strip()
@@ -68,6 +72,20 @@ class ChatTextArea(TextArea):  # type: ignore[misc]
                 return
 
         super()._on_key(event)
+
+    @on(TextArea.Changed)  # type: ignore[misc]
+    def _update_height(self, _event: TextArea.Changed | None = None) -> None:
+        if not self.parent:
+            return
+
+        line_count = self.document.line_count
+        target_lines = min(max(1, line_count), 8)
+
+        new_height = target_lines + 2
+
+        if self.parent.styles.height != new_height:
+            self.parent.styles.height = new_height
+            self.scroll_cursor_visible()
 
 
 class SplashScreen(Static):  # type: ignore[misc]
@@ -99,7 +117,7 @@ class SplashScreen(Static):  # type: ignore[misc]
         yield panel_static
 
     def on_mount(self) -> None:
-        self._animation_timer = self.set_interval(0.45, self._animate_start_line)
+        self._animation_timer = self.set_interval(0.05, self._animate_start_line)
 
     def on_unmount(self) -> None:
         if self._animation_timer is not None:
@@ -124,9 +142,14 @@ class SplashScreen(Static):  # type: ignore[misc]
             Align.center(self._build_tagline_text()),
             Align.center(Text(" ")),
             Align.center(start_line.copy()),
+            Align.center(Text(" ")),
+            Align.center(self._build_url_text()),
         )
 
         return Panel.fit(content, border_style=self.PRIMARY_GREEN, padding=(1, 6))
+
+    def _build_url_text(self) -> Text:
+        return Text("strix.ai", style=Style(color=self.PRIMARY_GREEN, bold=True))
 
     def _build_welcome_text(self) -> Text:
         text = Text("Welcome to ", style=Style(color="white", bold=True))
@@ -141,13 +164,25 @@ class SplashScreen(Static):  # type: ignore[misc]
         return Text("Open-source AI hackers for your apps", style=Style(color="white", dim=True))
 
     def _build_start_line_text(self, phase: int) -> Text:
-        emphasize = phase % 2 == 1
-        base_style = Style(color="white", dim=not emphasize, bold=emphasize)
-        strix_style = Style(color=self.PRIMARY_GREEN, bold=bool(emphasize))
+        full_text = "Starting Strix Agent"
+        text_len = len(full_text)
 
-        text = Text("Starting ", style=base_style)
-        text.append("Strix", style=strix_style)
-        text.append(" Cybersecurity Agent", style=base_style)
+        shine_pos = phase % (text_len + 8)
+
+        text = Text()
+        for i, char in enumerate(full_text):
+            dist = abs(i - shine_pos)
+
+            if dist <= 1:
+                style = Style(color="bright_white", bold=True)
+            elif dist <= 3:
+                style = Style(color="white", bold=True)
+            elif dist <= 5:
+                style = Style(color="#a3a3a3")
+            else:
+                style = Style(color="#525252")
+
+            text.append(char, style=style)
 
         return text
 
@@ -220,7 +255,7 @@ class StopAgentScreen(ModalScreen):  # type: ignore[misc]
 class QuitScreen(ModalScreen):  # type: ignore[misc]
     def compose(self) -> ComposeResult:
         yield Grid(
-            Label("🦉 Quit Strix? ", id="quit_title"),
+            Label("Quit Strix?", id="quit_title"),
             Grid(
                 Button("Yes", variant="error", id="quit"),
                 Button("No", variant="default", id="cancel"),
@@ -264,6 +299,8 @@ class QuitScreen(ModalScreen):  # type: ignore[misc]
 class StrixTUIApp(App):  # type: ignore[misc]
     CSS_PATH = "assets/tui_styles.tcss"
 
+    SIDEBAR_MIN_WIDTH = 100
+
     selected_agent_id: reactive[str | None] = reactive(default=None)
     show_splash: reactive[bool] = reactive(default=True)
 
@@ -297,15 +334,21 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "Generating",
             "Scanning",
             "Analyzing",
-            "Probing",
             "Hacking",
             "Testing",
             "Exploiting",
-            "Investigating",
+            "Pwning",
+            "Loading",
+            "Running",
+            "Working",
+            "Strixing",
+            "Thinking",
+            "Reasoning",
         ]
         self._agent_verbs: dict[str, str] = {}  # agent_id -> current_verb
         self._agent_verb_timers: dict[str, Any] = {}  # agent_id -> timer
-        self._agent_dot_states: dict[str, int] = {}  # agent_id -> dot_count (0-3)
+        self._spinner_frame_index: int = 0  # Current spinner frame index
+        self._spinner_frames: list[str] = list(SPINNERS["dots"]["frames"])  # Braille spinner frames
         self._dot_animation_timer: Any | None = None
 
         self._setup_cleanup_handlers()
@@ -450,7 +493,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         self._start_scan_thread()
 
-        self.set_interval(0.5, self._update_ui_from_tracer)
+        self.set_interval(0.25, self._update_ui_from_tracer)
 
     def _update_ui_from_tracer(self) -> None:
         if self.show_splash:
@@ -481,7 +524,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 agent_updates = True
 
         if agent_updates:
-            self._expand_all_agent_nodes()
+            self._expand_new_agent_nodes()
 
         self._update_chat_view()
 
@@ -509,7 +552,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
             }
 
             status_icon = status_indicators.get(status, "🔵")
-            agent_name = f"{status_icon} {escape_markup(agent_name_raw)}"
+            vuln_count = self._agent_vulnerability_count(agent_id)
+            vuln_indicator = f" ({vuln_count})" if vuln_count > 0 else ""
+            agent_name = f"{status_icon} {agent_name_raw}{vuln_indicator}"
 
             if status == "running":
                 self._start_agent_verb_timer(agent_id)
@@ -529,11 +574,32 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         return False
 
-    def _update_chat_view(self) -> None:
-        if len(self.screen_stack) > 1 or self.show_splash:
-            return
+    def _get_chat_content(
+        self,
+    ) -> tuple[Text | None, str | None]:
+        if not self.selected_agent_id:
+            return self._get_chat_placeholder_content(
+                "Select an agent from the tree to see its activity.", "placeholder-no-agent"
+            )
 
-        if not self.is_mounted:
+        events = self._gather_agent_events(self.selected_agent_id)
+        streaming = self.tracer.get_streaming_content(self.selected_agent_id)
+
+        if not events and not streaming:
+            return self._get_chat_placeholder_content(
+                "Starting agent...", "placeholder-no-activity"
+            )
+
+        current_event_ids = [e["id"] for e in events]
+
+        if not streaming and current_event_ids == self._displayed_events:
+            return None, None
+
+        self._displayed_events = current_event_ids
+        return self._get_rendered_events_content(events), "chat-content"
+
+    def _update_chat_view(self) -> None:
+        if len(self.screen_stack) > 1 or self.show_splash or not self.is_mounted:
             return
 
         try:
@@ -549,27 +615,12 @@ class StrixTUIApp(App):  # type: ignore[misc]
         except (AttributeError, ValueError):
             is_at_bottom = True
 
-        if not self.selected_agent_id:
-            content, css_class = self._get_chat_placeholder_content(
-                "Select an agent from the tree to see its activity.", "placeholder-no-agent"
-            )
-        else:
-            events = self._gather_agent_events(self.selected_agent_id)
-            if not events:
-                content, css_class = self._get_chat_placeholder_content(
-                    "Starting agent...", "placeholder-no-activity"
-                )
-            else:
-                current_event_ids = [e["id"] for e in events]
-                if current_event_ids == self._displayed_events:
-                    return
-                content = self._get_rendered_events_content(events)
-                css_class = "chat-content"
-                self._displayed_events = current_event_ids
+        content, css_class = self._get_chat_content()
+        if content is None:
+            return
 
         chat_display = self.query_one("#chat_display", Static)
-        self._update_static_content_safe(chat_display, content)
-
+        self._safe_widget_operation(chat_display.update, content)
         chat_display.set_classes(css_class)
 
         if is_at_bottom:
@@ -577,26 +628,165 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
     def _get_chat_placeholder_content(
         self, message: str, placeholder_class: str
-    ) -> tuple[str, str]:
+    ) -> tuple[Text, str]:
         self._displayed_events = [placeholder_class]
-        return message, f"chat-placeholder {placeholder_class}"
+        text = Text()
+        text.append(message)
+        return text, f"chat-placeholder {placeholder_class}"
 
-    def _get_rendered_events_content(self, events: list[dict[str, Any]]) -> str:
+    def _get_rendered_events_content(self, events: list[dict[str, Any]]) -> Text:
+        result = Text()
+
         if not events:
-            return ""
+            return result
 
-        content_lines = []
+        first = True
         for event in events:
-            if event["type"] == "chat":
-                chat_content = self._render_chat_content(event["data"])
-                if chat_content:
-                    content_lines.append(chat_content)
-            elif event["type"] == "tool":
-                tool_content = self._render_tool_content_simple(event["data"])
-                if tool_content:
-                    content_lines.append(tool_content)
+            content: Text | None = None
 
-        return "\n\n".join(content_lines)
+            if event["type"] == "chat":
+                content = self._render_chat_content(event["data"])
+            elif event["type"] == "tool":
+                content = self._render_tool_content_simple(event["data"])
+
+            if content:
+                if not first:
+                    result.append("\n\n")
+                result.append_text(content)
+                first = False
+
+        if self.selected_agent_id:
+            streaming = self.tracer.get_streaming_content(self.selected_agent_id)
+            if streaming:
+                streaming_text = self._render_streaming_content(streaming)
+                if streaming_text:
+                    if not first:
+                        result.append("\n\n")
+                    result.append_text(streaming_text)
+
+        return result
+
+    def _render_streaming_content(self, content: str) -> Text:
+        from strix.interface.streaming_parser import parse_streaming_content
+
+        result = Text()
+        segments = parse_streaming_content(content)
+
+        for i, segment in enumerate(segments):
+            if i > 0:
+                result.append("\n\n")
+
+            if segment.type == "text":
+                from strix.interface.tool_components.agent_message_renderer import (
+                    AgentMessageRenderer,
+                )
+
+                text_content = AgentMessageRenderer.render_simple(segment.content)
+                result.append_text(text_content)
+
+            elif segment.type == "tool":
+                tool_text = self._render_streaming_tool(
+                    segment.tool_name or "unknown",
+                    segment.args or {},
+                    segment.is_complete,
+                )
+                result.append_text(tool_text)
+
+        return result
+
+    def _render_streaming_tool(
+        self, tool_name: str, args: dict[str, str], is_complete: bool
+    ) -> Text:
+        from strix.interface.tool_components.registry import get_tool_renderer
+
+        tool_data = {
+            "tool_name": tool_name,
+            "args": args,
+            "status": "completed" if is_complete else "running",
+            "result": None,
+        }
+
+        renderer = get_tool_renderer(tool_name)
+        if renderer:
+            widget = renderer.render(tool_data)
+            renderable = widget.renderable
+            if isinstance(renderable, Text):
+                return renderable
+            text = Text()
+            text.append(str(renderable))
+            return text
+
+        return self._render_default_streaming_tool(tool_name, args, is_complete)
+
+    def _render_default_streaming_tool(
+        self, tool_name: str, args: dict[str, str], is_complete: bool
+    ) -> Text:
+        text = Text()
+
+        if is_complete:
+            text.append("✓ ", style="green")
+        else:
+            text.append("● ", style="yellow")
+
+        text.append("Using tool ", style="dim")
+        text.append(tool_name, style="bold blue")
+
+        if args:
+            for key, value in list(args.items())[:3]:
+                text.append("\n  ")
+                text.append(key, style="dim")
+                text.append(": ")
+                display_value = value if len(value) <= 100 else value[:97] + "..."
+                text.append(display_value, style="italic" if not is_complete else None)
+
+        return text
+
+    def _get_status_display_content(
+        self, agent_id: str, agent_data: dict[str, Any]
+    ) -> tuple[Text | None, Text, bool]:
+        status = agent_data.get("status", "running")
+
+        def keymap_text(msg: str) -> Text:
+            t = Text()
+            t.append(msg, style="dim")
+            return t
+
+        simple_statuses: dict[str, tuple[str, str]] = {
+            "stopping": ("Agent stopping...", ""),
+            "stopped": ("Agent stopped", ""),
+            "completed": ("Agent completed", ""),
+        }
+
+        if status in simple_statuses:
+            msg, km = simple_statuses[status]
+            text = Text()
+            text.append(msg)
+            return (text, keymap_text(km), False)
+
+        if status == "llm_failed":
+            error_msg = agent_data.get("error_message", "")
+            text = Text()
+            if error_msg:
+                text.append(error_msg, style="red")
+            else:
+                text.append("LLM request failed", style="red")
+            self._stop_dot_animation()
+            return (text, keymap_text("Send message to retry"), False)
+
+        if status == "waiting":
+            animated_text = self._get_animated_waiting_text(agent_id)
+            return (animated_text, keymap_text("Send message to resume"), True)
+
+        if status == "running":
+            verb = (
+                self._get_agent_verb(agent_id)
+                if self._agent_has_real_activity(agent_id)
+                else "Initializing Agent"
+            )
+            animated_text = self._get_animated_verb_text(agent_id, verb)
+            return (animated_text, keymap_text("ESC to stop | CTRL-C to quit and save"), True)
+
+        return (None, Text(), False)
 
     def _update_agent_status_display(self) -> None:
         try:
@@ -616,52 +806,20 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         try:
             agent_data = self.tracer.agents[self.selected_agent_id]
-            status = agent_data.get("status", "running")
+            content, keymap, should_animate = self._get_status_display_content(
+                self.selected_agent_id, agent_data
+            )
 
-            if status == "stopping":
-                self._safe_widget_operation(status_text.update, "Agent stopping...")
-                self._safe_widget_operation(keymap_indicator.update, "")
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-            elif status == "stopped":
-                self._safe_widget_operation(status_text.update, "Agent stopped")
-                self._safe_widget_operation(keymap_indicator.update, "")
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-            elif status == "completed":
-                self._safe_widget_operation(status_text.update, "Agent completed")
-                self._safe_widget_operation(keymap_indicator.update, "")
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-            elif status == "llm_failed":
-                error_msg = agent_data.get("error_message", "")
-                display_msg = (
-                    f"[red]{escape_markup(error_msg)}[/red]"
-                    if error_msg
-                    else "[red]LLM request failed[/red]"
-                )
-                self._safe_widget_operation(status_text.update, display_msg)
-                self._safe_widget_operation(
-                    keymap_indicator.update, "[dim]Send message to retry[/dim]"
-                )
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-                self._stop_dot_animation()
-            elif status == "waiting":
-                animated_text = self._get_animated_waiting_text(self.selected_agent_id)
-                self._safe_widget_operation(status_text.update, animated_text)
-                self._safe_widget_operation(
-                    keymap_indicator.update, "[dim]Send message to resume[/dim]"
-                )
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-                self._start_dot_animation()
-            elif status == "running":
-                current_verb = self._get_agent_verb(self.selected_agent_id)
-                animated_text = self._get_animated_verb_text(self.selected_agent_id, current_verb)
-                self._safe_widget_operation(status_text.update, animated_text)
-                self._safe_widget_operation(
-                    keymap_indicator.update, "[dim]ESC to stop | CTRL-C to quit and save[/dim]"
-                )
-                self._safe_widget_operation(status_display.remove_class, "hidden")
-                self._start_dot_animation()
-            else:
+            if not content:
                 self._safe_widget_operation(status_display.add_class, "hidden")
+                return
+
+            self._safe_widget_operation(status_text.update, content)
+            self._safe_widget_operation(keymap_indicator.update, keymap)
+            self._safe_widget_operation(status_display.remove_class, "hidden")
+
+            if should_animate:
+                self._start_dot_animation()
 
         except (KeyError, Exception):
             self._safe_widget_operation(status_display.add_class, "hidden")
@@ -685,9 +843,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         stats_panel = Panel(
             stats_content,
-            title="📊 Live Stats",
-            title_align="left",
-            border_style="#22c55e",
+            border_style="#333333",
             padding=(0, 1),
         )
 
@@ -721,26 +877,25 @@ class StrixTUIApp(App):  # type: ignore[misc]
         if self.selected_agent_id == agent_id:
             self._update_agent_status_display()
 
-    def _get_animated_verb_text(self, agent_id: str, verb: str) -> str:
-        if agent_id not in self._agent_dot_states:
-            self._agent_dot_states[agent_id] = 0
+    def _get_animated_verb_text(self, agent_id: str, verb: str) -> Text:  # noqa: ARG002
+        text = Text()
+        spinner_char = self._spinner_frames[self._spinner_frame_index % len(self._spinner_frames)]
+        text.append(spinner_char, style=Style(color="#22c55e"))
+        text.append(" ", style=Style(color="white"))
+        text.append(verb, style=Style(color="white"))
+        return text
 
-        dot_count = self._agent_dot_states[agent_id]
-        dots = "." * dot_count
-        return f"{verb}{dots}"
-
-    def _get_animated_waiting_text(self, agent_id: str) -> str:
-        if agent_id not in self._agent_dot_states:
-            self._agent_dot_states[agent_id] = 0
-
-        dot_count = self._agent_dot_states[agent_id]
-        dots = "." * dot_count
-
-        return f"Waiting{dots}"
+    def _get_animated_waiting_text(self, agent_id: str) -> Text:  # noqa: ARG002
+        text = Text()
+        spinner_char = self._spinner_frames[self._spinner_frame_index % len(self._spinner_frames)]
+        text.append(spinner_char, style=Style(color="#fbbf24"))
+        text.append(" ", style=Style(color="white"))
+        text.append("Waiting", style=Style(color="#fbbf24"))
+        return text
 
     def _start_dot_animation(self) -> None:
         if self._dot_animation_timer is None:
-            self._dot_animation_timer = self.set_interval(0.6, self._animate_dots)
+            self._dot_animation_timer = self.set_interval(0.05, self._animate_dots)
 
     def _stop_dot_animation(self) -> None:
         if self._dot_animation_timer is not None:
@@ -750,29 +905,48 @@ class StrixTUIApp(App):  # type: ignore[misc]
     def _animate_dots(self) -> None:
         has_active_agents = False
 
-        for agent_id, agent_data in list(self.tracer.agents.items()):
+        if self.selected_agent_id and self.selected_agent_id in self.tracer.agents:
+            agent_data = self.tracer.agents[self.selected_agent_id]
             status = agent_data.get("status", "running")
             if status in ["running", "waiting"]:
                 has_active_agents = True
-                current_dots = self._agent_dot_states.get(agent_id, 0)
-                self._agent_dot_states[agent_id] = (current_dots + 1) % 4
-
-        if (
-            has_active_agents
-            and self.selected_agent_id
-            and self.selected_agent_id in self.tracer.agents
-        ):
-            selected_status = self.tracer.agents[self.selected_agent_id].get("status", "running")
-            if selected_status in ["running", "waiting"]:
+                self._spinner_frame_index = (self._spinner_frame_index + 1) % len(
+                    self._spinner_frames
+                )
                 self._update_agent_status_display()
 
         if not has_active_agents:
+            has_active_agents = any(
+                agent_data.get("status", "running") in ["running", "waiting"]
+                for agent_data in self.tracer.agents.values()
+            )
+
+        if not has_active_agents:
             self._stop_dot_animation()
-            for agent_id in list(self._agent_dot_states.keys()):
-                if agent_id not in self.tracer.agents or self.tracer.agents[agent_id].get(
-                    "status"
-                ) not in ["running", "waiting"]:
-                    del self._agent_dot_states[agent_id]
+            self._spinner_frame_index = 0
+
+    def _agent_has_real_activity(self, agent_id: str) -> bool:
+        initial_tools = {"scan_start_info", "subagent_start_info"}
+
+        for _exec_id, tool_data in list(self.tracer.tool_executions.items()):
+            if tool_data.get("agent_id") == agent_id:
+                tool_name = tool_data.get("tool_name", "")
+                if tool_name not in initial_tools:
+                    return True
+        return False
+
+    def _agent_vulnerability_count(self, agent_id: str) -> int:
+        count = 0
+        for _exec_id, tool_data in list(self.tracer.tool_executions.items()):
+            if tool_data.get("agent_id") == agent_id:
+                tool_name = tool_data.get("tool_name", "")
+                if tool_name == "create_vulnerability_report":
+                    status = tool_data.get("status", "")
+                    if status == "completed":
+                        result = tool_data.get("result", {})
+                        if isinstance(result, dict) and result.get("success"):
+                            count += 1
+        return count
 
     def _gather_agent_events(self, agent_id: str) -> list[dict[str, Any]]:
         chat_events = [
@@ -872,7 +1046,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
         }
 
         status_icon = status_indicators.get(status, "🔵")
-        agent_name = f"{status_icon} {escape_markup(agent_name_raw)}"
+        vuln_count = self._agent_vulnerability_count(agent_id)
+        vuln_indicator = f" ({vuln_count})" if vuln_count > 0 else ""
+        agent_name = f"{status_icon} {agent_name_raw}{vuln_indicator}"
 
         if status in ["running", "waiting"]:
             self._start_agent_verb_timer(agent_id)
@@ -904,6 +1080,13 @@ class StrixTUIApp(App):  # type: ignore[misc]
             import logging
 
             logging.warning(f"Failed to add agent node {agent_id}: {e}")
+
+    def _expand_new_agent_nodes(self) -> None:
+        if len(self.screen_stack) > 1 or self.show_splash:
+            return
+
+        if not self.is_mounted:
+            return
 
     def _expand_all_agent_nodes(self) -> None:
         if len(self.screen_stack) > 1 or self.show_splash:
@@ -940,7 +1123,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
         }
 
         status_icon = status_indicators.get(status, "🔵")
-        agent_name = f"{status_icon} {escape_markup(agent_name_raw)}"
+        vuln_count = self._agent_vulnerability_count(agent_id)
+        vuln_indicator = f" ({vuln_count})" if vuln_count > 0 else ""
+        agent_name = f"{status_icon} {agent_name_raw}{vuln_indicator}"
 
         new_node = new_parent.add(
             agent_name,
@@ -984,48 +1169,37 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 old_node.remove()
 
         parent_node.allow_expand = True
-        self._expand_all_agent_nodes()
+        parent_node.expand()
 
-    def _render_chat_content(self, msg_data: dict[str, Any]) -> str:
+    def _render_chat_content(self, msg_data: dict[str, Any]) -> Text | None:
         role = msg_data.get("role")
         content = msg_data.get("content", "")
+        metadata = msg_data.get("metadata", {})
 
         if not content:
-            return ""
+            return None
 
         if role == "user":
             from strix.interface.tool_components.user_message_renderer import UserMessageRenderer
 
-            return UserMessageRenderer.render_simple(escape_markup(content))
+            return UserMessageRenderer.render_simple(content)
+
+        if metadata.get("interrupted"):
+            result = self._render_streaming_content(content)
+            result.append("\n")
+            result.append("⚠ ", style="yellow")
+            result.append("Interrupted by user", style="yellow dim")
+            return result
 
         from strix.interface.tool_components.agent_message_renderer import AgentMessageRenderer
 
         return AgentMessageRenderer.render_simple(content)
 
-    def _render_tool_content_simple(self, tool_data: dict[str, Any]) -> str:
+    def _render_tool_content_simple(self, tool_data: dict[str, Any]) -> Text | None:
         tool_name = tool_data.get("tool_name", "Unknown Tool")
         args = tool_data.get("args", {})
         status = tool_data.get("status", "unknown")
         result = tool_data.get("result")
-
-        tool_colors = {
-            "terminal_execute": "#22c55e",
-            "browser_action": "#06b6d4",
-            "python_action": "#3b82f6",
-            "agents_graph_action": "#fbbf24",
-            "file_edit_action": "#10b981",
-            "proxy_action": "#06b6d4",
-            "notes_action": "#fbbf24",
-            "thinking_action": "#a855f7",
-            "web_search_action": "#22c55e",
-            "finish_action": "#dc2626",
-            "reporting_action": "#ea580c",
-            "scan_start_info": "#22c55e",
-            "subagent_start_info": "#22c55e",
-            "llm_error_details": "#dc2626",
-        }
-
-        color = tool_colors.get(tool_name, "#737373")
 
         from strix.interface.tool_components.registry import get_tool_renderer
 
@@ -1033,44 +1207,57 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         if renderer:
             widget = renderer.render(tool_data)
-            content = str(widget.renderable)
-        elif tool_name == "llm_error_details":
-            lines = ["[red]✗ LLM Request Failed[/red]"]
+            renderable = widget.renderable
+            if isinstance(renderable, Text):
+                return renderable
+            text = Text()
+            text.append(str(renderable))
+            return text
+
+        text = Text()
+
+        if tool_name == "llm_error_details":
+            text.append("✗ LLM Request Failed", style="red")
             if args.get("details"):
-                details = args["details"]
+                details = str(args["details"])
                 if len(details) > 300:
                     details = details[:297] + "..."
-                lines.append(f"[dim]Details:[/dim] {escape_markup(details)}")
-            content = "\n".join(lines)
-        else:
-            status_icons = {
-                "running": "[yellow]●[/yellow]",
-                "completed": "[green]✓[/green]",
-                "failed": "[red]✗[/red]",
-                "error": "[red]✗[/red]",
-            }
-            status_icon = status_icons.get(status, "[dim]○[/dim]")
+                text.append("\nDetails: ", style="dim")
+                text.append(details)
+            return text
 
-            lines = [f"→ Using tool [bold blue]{escape_markup(tool_name)}[/] {status_icon}"]
+        text.append("→ Using tool ")
+        text.append(tool_name, style="bold blue")
 
-            if args:
-                for k, v in list(args.items())[:2]:
-                    str_v = str(v)
-                    if len(str_v) > 80:
-                        str_v = str_v[:77] + "..."
-                    lines.append(f"  [dim]{k}:[/] {escape_markup(str_v)}")
+        status_styles = {
+            "running": ("●", "yellow"),
+            "completed": ("✓", "green"),
+            "failed": ("✗", "red"),
+            "error": ("✗", "red"),
+        }
+        icon, style = status_styles.get(status, ("○", "dim"))
+        text.append(" ")
+        text.append(icon, style=style)
 
-            if status in ["completed", "failed", "error"] and result:
-                result_str = str(result)
-                if len(result_str) > 150:
-                    result_str = result_str[:147] + "..."
-                lines.append(f"[bold]Result:[/] {escape_markup(result_str)}")
+        if args:
+            for k, v in list(args.items())[:2]:
+                str_v = str(v)
+                if len(str_v) > 80:
+                    str_v = str_v[:77] + "..."
+                text.append("\n  ")
+                text.append(k, style="dim")
+                text.append(": ")
+                text.append(str_v)
 
-            content = "\n".join(lines)
+        if status in ["completed", "failed", "error"] and result:
+            result_str = str(result)
+            if len(result_str) > 150:
+                result_str = result_str[:147] + "..."
+            text.append("\n")
+            text.append("Result: ", style="bold")
+            text.append(result_str)
 
-        lines = content.split("\n")
-        bordered_lines = [f"[{color}]▍[/{color}] {line}" for line in lines]
-        return "\n".join(bordered_lines)
+        return text
 
     @on(Tree.NodeHighlighted)  # type: ignore[misc]
     def handle_tree_highlight(self, event: Tree.NodeHighlighted) -> None:
@@ -1092,9 +1279,47 @@ class StrixTUIApp(App):  # type: ignore[misc]
             if agent_id:
                 self.selected_agent_id = agent_id
 
+    @on(Tree.NodeSelected)  # type: ignore[misc]
+    def handle_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        if len(self.screen_stack) > 1 or self.show_splash:
+            return
+
+        if not self.is_mounted:
+            return
+
+        node = event.node
+
+        if node.allow_expand:
+            if node.is_expanded:
+                node.collapse()
+            else:
+                node.expand()
+
     def _send_user_message(self, message: str) -> None:
         if not self.selected_agent_id:
             return
+
+        if self.tracer:
+            streaming_content = self.tracer.get_streaming_content(self.selected_agent_id)
+            if streaming_content and streaming_content.strip():
+                self.tracer.clear_streaming_content(self.selected_agent_id)
+                self.tracer.interrupted_content[self.selected_agent_id] = streaming_content
+                self.tracer.log_chat_message(
+                    content=streaming_content,
+                    role="assistant",
+                    agent_id=self.selected_agent_id,
+                    metadata={"interrupted": True},
+                )
+
+        try:
+            from strix.tools.agents_graph.agents_graph_actions import _agent_instances
+
+            if self.selected_agent_id in _agent_instances:
+                agent_instance = _agent_instances[self.selected_agent_id]
+                if hasattr(agent_instance, "cancel_current_execution"):
+                    agent_instance.cancel_current_execution()
+        except (ImportError, AttributeError, KeyError):
+            pass
 
         if self.tracer:
             self.tracer.log_chat_message(
@@ -1258,18 +1483,22 @@ class StrixTUIApp(App):  # type: ignore[misc]
         else:
             return True
 
-    def _update_static_content_safe(self, widget: Static, content: str) -> None:
-        try:
-            widget.update(content)
-        except Exception:  # noqa: BLE001
-            try:
-                safe_text = Text.from_markup(content)
-                widget.update(safe_text)
-            except Exception:  # noqa: BLE001
-                import re
+    def on_resize(self, event: events.Resize) -> None:
+        if self.show_splash or not self.is_mounted:
+            return
 
-                plain_text = re.sub(r"\[.*?\]", "", content)
-                widget.update(plain_text)
+        try:
+            sidebar = self.query_one("#sidebar", Vertical)
+            chat_area = self.query_one("#chat_area_container", Vertical)
+        except (ValueError, Exception):
+            return
+
+        if event.size.width < self.SIDEBAR_MIN_WIDTH:
+            sidebar.add_class("-hidden")
+            chat_area.add_class("-full-width")
+        else:
+            sidebar.remove_class("-hidden")
+            chat_area.remove_class("-full-width")
 
 
 async def run_tui(args: argparse.Namespace) -> None:

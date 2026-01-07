@@ -1,5 +1,6 @@
 from typing import Any, ClassVar
 
+from rich.text import Text
 from textual.widgets import Static
 
 from .base_renderer import BaseToolRenderer
@@ -12,11 +13,15 @@ class ViewAgentGraphRenderer(BaseToolRenderer):
     css_classes: ClassVar[list[str]] = ["tool-call", "agents-graph-tool"]
 
     @classmethod
-    def render(cls, tool_data: dict[str, Any]) -> Static:  # noqa: ARG003
-        content_text = "🕸️ [bold #fbbf24]Viewing agents graph[/]"
+    def render(cls, tool_data: dict[str, Any]) -> Static:
+        status = tool_data.get("status", "unknown")
 
-        css_classes = cls.get_css_classes("completed")
-        return Static(content_text, classes=css_classes)
+        text = Text()
+        text.append("◇ ", style="#a78bfa")
+        text.append("viewing agents graph", style="dim")
+
+        css_classes = cls.get_css_classes(status)
+        return Static(text, classes=css_classes)
 
 
 @register_tool_renderer
@@ -27,20 +32,22 @@ class CreateAgentRenderer(BaseToolRenderer):
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:
         args = tool_data.get("args", {})
+        status = tool_data.get("status", "unknown")
 
         task = args.get("task", "")
         name = args.get("name", "Agent")
 
-        header = f"🤖 [bold #fbbf24]Creating {cls.escape_markup(name)}[/]"
+        text = Text()
+        text.append("◈ ", style="#a78bfa")
+        text.append("spawning ", style="dim")
+        text.append(name, style="bold #a78bfa")
 
         if task:
-            task_display = task[:400] + "..." if len(task) > 400 else task
-            content_text = f"{header}\n  [dim]{cls.escape_markup(task_display)}[/]"
-        else:
-            content_text = f"{header}\n  [dim]Spawning agent...[/]"
+            text.append("\n  ")
+            text.append(task, style="dim")
 
-        css_classes = cls.get_css_classes("completed")
-        return Static(content_text, classes=css_classes)
+        css_classes = cls.get_css_classes(status)
+        return Static(text, classes=css_classes)
 
 
 @register_tool_renderer
@@ -51,19 +58,24 @@ class SendMessageToAgentRenderer(BaseToolRenderer):
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:
         args = tool_data.get("args", {})
+        status = tool_data.get("status", "unknown")
 
         message = args.get("message", "")
+        agent_id = args.get("agent_id", "")
 
-        header = "💬 [bold #fbbf24]Sending message[/]"
+        text = Text()
+        text.append("→ ", style="#60a5fa")
+        if agent_id:
+            text.append(f"to {agent_id}", style="dim")
+        else:
+            text.append("sending message", style="dim")
 
         if message:
-            message_display = message[:400] + "..." if len(message) > 400 else message
-            content_text = f"{header}\n  [dim]{cls.escape_markup(message_display)}[/]"
-        else:
-            content_text = f"{header}\n  [dim]Sending...[/]"
+            text.append("\n  ")
+            text.append(message, style="dim")
 
-        css_classes = cls.get_css_classes("completed")
-        return Static(content_text, classes=css_classes)
+        css_classes = cls.get_css_classes(status)
+        return Static(text, classes=css_classes)
 
 
 @register_tool_renderer
@@ -79,25 +91,28 @@ class AgentFinishRenderer(BaseToolRenderer):
         findings = args.get("findings", [])
         success = args.get("success", True)
 
-        header = (
-            "🏁 [bold #fbbf24]Agent completed[/]" if success else "🏁 [bold #fbbf24]Agent failed[/]"
-        )
+        text = Text()
+        text.append("🏁 ")
+
+        if success:
+            text.append("Agent completed", style="bold #fbbf24")
+        else:
+            text.append("Agent failed", style="bold #fbbf24")
 
         if result_summary:
-            content_parts = [f"{header}\n  [bold]{cls.escape_markup(result_summary)}[/]"]
+            text.append("\n  ")
+            text.append(result_summary, style="bold")
 
             if findings and isinstance(findings, list):
-                finding_lines = [f"• {finding}" for finding in findings]
-                content_parts.append(
-                    f"  [dim]{chr(10).join([cls.escape_markup(line) for line in finding_lines])}[/]"
-                )
-
-            content_text = "\n".join(content_parts)
+                for finding in findings:
+                    text.append("\n  • ")
+                    text.append(str(finding), style="dim")
         else:
-            content_text = f"{header}\n  [dim]Completing task...[/]"
+            text.append("\n  ")
+            text.append("Completing task...", style="dim")
 
         css_classes = cls.get_css_classes("completed")
-        return Static(content_text, classes=css_classes)
+        return Static(text, classes=css_classes)
 
 
 @register_tool_renderer
@@ -108,16 +123,17 @@ class WaitForMessageRenderer(BaseToolRenderer):
     @classmethod
     def render(cls, tool_data: dict[str, Any]) -> Static:
         args = tool_data.get("args", {})
+        status = tool_data.get("status", "unknown")
 
-        reason = args.get("reason", "Waiting for messages from other agents or user input")
+        reason = args.get("reason", "")
 
-        header = "⏸️ [bold #fbbf24]Waiting for messages[/]"
+        text = Text()
+        text.append("○ ", style="#6b7280")
+        text.append("waiting", style="dim")
 
         if reason:
-            reason_display = reason[:400] + "..." if len(reason) > 400 else reason
-            content_text = f"{header}\n  [dim]{cls.escape_markup(reason_display)}[/]"
-        else:
-            content_text = f"{header}\n  [dim]Agent paused until message received...[/]"
+            text.append("\n  ")
+            text.append(reason, style="dim")
 
-        css_classes = cls.get_css_classes("completed")
-        return Static(content_text, classes=css_classes)
+        css_classes = cls.get_css_classes(status)
+        return Static(text, classes=css_classes)
