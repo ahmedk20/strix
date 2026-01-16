@@ -4,27 +4,49 @@ import os
 import secrets
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import docker
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 
+from strix.config import Config
+
+from . import SandboxInitializationError
 from .runtime import AbstractRuntime, SandboxInfo
 
 
-STRIX_IMAGE = os.getenv("STRIX_IMAGE", "ghcr.io/usestrix/strix-sandbox:0.1.10")
+HOST_GATEWAY_HOSTNAME = "host.docker.internal"
+DOCKER_TIMEOUT = 60  # seconds
+TOOL_SERVER_HEALTH_REQUEST_TIMEOUT = 5  # seconds per health check request
+TOOL_SERVER_HEALTH_RETRIES = 10  # number of retries for health check
 logger = logging.getLogger(__name__)
 
 
 class DockerRuntime(AbstractRuntime):
     def __init__(self) -> None:
         try:
-            self.client = docker.from_env()
-        except DockerException as e:
+            self.client = docker.from_env(timeout=DOCKER_TIMEOUT)
+        except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
             logger.exception("Failed to connect to Docker daemon")
-            raise RuntimeError("Docker is not available or not configured correctly.") from e
+            if isinstance(e, RequestsConnectionError | RequestsTimeout):
+                raise SandboxInitializationError(
+                    "Docker daemon unresponsive",
+                    f"Connection timed out after {DOCKER_TIMEOUT} seconds. "
+                    "Please ensure Docker Desktop is installed and running, "
+                    "and try running strix again.",
+                ) from e
+            raise SandboxInitializationError(
+                "Docker is not available",
+                "Docker is not available or not configured correctly. "
+                "Please ensure Docker Desktop is installed and running, "
+                "and try running strix again.",
+            ) from e
 
         self._scan_container: Container | None = None
         self._tool_server_port: int | None = None
@@ -37,6 +59,23 @@ class DockerRuntime(AbstractRuntime):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             return cast("int", s.getsockname()[1])
+
+    def _exec_run_with_timeout(
+        self, container: Container, cmd: str, timeout: int = DOCKER_TIMEOUT, **kwargs: Any
+    ) -> Any:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(container.exec_run, cmd, **kwargs)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                logger.exception(f"exec_run timed out after {timeout}s: {cmd[:100]}...")
+                raise SandboxInitializationError(
+                    "Container command timed out",
+                    f"Command timed out after {timeout} seconds. "
+                    "Docker may be overloaded or unresponsive. "
+                    "Please ensure Docker Desktop is installed and running, "
+                    "and try running strix again.",
+                ) from None
 
     def _get_scan_id(self, agent_id: str) -> str:
         try:
@@ -80,10 +119,13 @@ class DockerRuntime(AbstractRuntime):
     def _create_container_with_retry(self, scan_id: str, max_retries: int = 3) -> Container:
         last_exception = None
         container_name = f"strix-scan-{scan_id}"
+        image_name = Config.get("strix_image")
+        if not image_name:
+            raise ValueError("STRIX_IMAGE must be configured")
 
         for attempt in range(max_retries):
             try:
-                self._verify_image_available(STRIX_IMAGE)
+                self._verify_image_available(image_name)
 
                 try:
                     existing_container = self.client.containers.get(container_name)
@@ -105,7 +147,7 @@ class DockerRuntime(AbstractRuntime):
                 self._tool_server_token = tool_server_token
 
                 container = self.client.containers.run(
-                    STRIX_IMAGE,
+                    image_name,
                     command="sleep infinity",
                     detach=True,
                     name=container_name,
@@ -121,7 +163,9 @@ class DockerRuntime(AbstractRuntime):
                         "CAIDO_PORT": str(caido_port),
                         "TOOL_SERVER_PORT": str(tool_server_port),
                         "TOOL_SERVER_TOKEN": tool_server_token,
+                        "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
                     },
+                    extra_hosts=self._get_extra_hosts(),
                     tty=True,
                 )
 
@@ -131,7 +175,7 @@ class DockerRuntime(AbstractRuntime):
                 self._initialize_container(
                     container, caido_port, tool_server_port, tool_server_token
                 )
-            except DockerException as e:
+            except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
                 last_exception = e
                 if attempt == max_retries - 1:
                     logger.exception(f"Failed to create container after {max_retries} attempts")
@@ -147,8 +191,19 @@ class DockerRuntime(AbstractRuntime):
             else:
                 return container
 
-        raise RuntimeError(
-            f"Failed to create Docker container after {max_retries} attempts: {last_exception}"
+        if isinstance(last_exception, RequestsConnectionError | RequestsTimeout):
+            raise SandboxInitializationError(
+                "Failed to create sandbox container",
+                f"Docker daemon unresponsive after {max_retries} attempts "
+                f"(timed out after {DOCKER_TIMEOUT}s). "
+                "Please ensure Docker Desktop is installed and running, "
+                "and try running strix again.",
+            ) from last_exception
+        raise SandboxInitializationError(
+            "Failed to create sandbox container",
+            f"Container creation failed after {max_retries} attempts: {last_exception}. "
+            "Please ensure Docker Desktop is installed and running, "
+            "and try running strix again.",
         ) from last_exception
 
     def _get_or_create_scan_container(self, scan_id: str) -> Container:  # noqa: PLR0912
@@ -193,7 +248,7 @@ class DockerRuntime(AbstractRuntime):
 
         except NotFound:
             pass
-        except DockerException as e:
+        except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
             logger.warning(f"Failed to get container by name {container_name}: {e}")
         else:
             return container
@@ -217,7 +272,7 @@ class DockerRuntime(AbstractRuntime):
 
                 logger.info(f"Found existing container by label for scan {scan_id}")
                 return container
-        except DockerException as e:
+        except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
             logger.warning("Failed to find existing container by label for scan %s: %s", scan_id, e)
 
         logger.info("Creating new Docker container for scan %s", scan_id)
@@ -227,15 +282,18 @@ class DockerRuntime(AbstractRuntime):
         self, container: Container, caido_port: int, tool_server_port: int, tool_server_token: str
     ) -> None:
         logger.info("Initializing Caido proxy on port %s", caido_port)
-        result = container.exec_run(
+        self._exec_run_with_timeout(
+            container,
             f"bash -c 'export CAIDO_PORT={caido_port} && /usr/local/bin/docker-entrypoint.sh true'",
             detach=False,
         )
 
         time.sleep(5)
 
-        result = container.exec_run(
-            "bash -c 'source /etc/profile.d/proxy.sh && echo $CAIDO_API_TOKEN'", user="pentester"
+        result = self._exec_run_with_timeout(
+            container,
+            "bash -c 'source /etc/profile.d/proxy.sh && echo $CAIDO_API_TOKEN'",
+            user="pentester",
         )
         caido_token = result.output.decode().strip() if result.exit_code == 0 else ""
 
@@ -248,7 +306,57 @@ class DockerRuntime(AbstractRuntime):
             user="pentester",
         )
 
-        time.sleep(5)
+        time.sleep(2)
+
+        host = self._resolve_docker_host()
+        health_url = f"http://{host}:{tool_server_port}/health"
+        self._wait_for_tool_server_health(health_url)
+
+    def _wait_for_tool_server_health(
+        self,
+        health_url: str,
+        max_retries: int = TOOL_SERVER_HEALTH_RETRIES,
+        request_timeout: int = TOOL_SERVER_HEALTH_REQUEST_TIMEOUT,
+    ) -> None:
+        import httpx
+
+        logger.info(f"Waiting for tool server health at {health_url}")
+
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(trust_env=False, timeout=request_timeout) as client:
+                    response = client.get(health_url)
+                    response.raise_for_status()
+                    health_data = response.json()
+
+                    if health_data.get("status") == "healthy":
+                        logger.info(
+                            f"Tool server is healthy after {attempt + 1} attempt(s): {health_data}"
+                        )
+                        return
+
+                    logger.warning(f"Tool server returned unexpected status: {health_data}")
+
+            except httpx.ConnectError:
+                logger.debug(
+                    f"Tool server not ready (attempt {attempt + 1}/{max_retries}): "
+                    f"Connection refused"
+                )
+            except httpx.TimeoutException:
+                logger.debug(
+                    f"Tool server not ready (attempt {attempt + 1}/{max_retries}): "
+                    f"Request timed out"
+                )
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.debug(f"Tool server not ready (attempt {attempt + 1}/{max_retries}): {e}")
+
+            sleep_time = min(2**attempt * 0.5, 5)
+            time.sleep(sleep_time)
+
+        raise SandboxInitializationError(
+            "Tool server failed to start",
+            "Please ensure Docker Desktop is installed and running, and try running strix again.",
+        )
 
     def _copy_local_directory_to_container(
         self, container: Container, local_path: str, target_name: str | None = None
@@ -380,6 +488,9 @@ class DockerRuntime(AbstractRuntime):
             return parsed.hostname
 
         return "127.0.0.1"
+
+    def _get_extra_hosts(self) -> dict[str, str]:
+        return {HOST_GATEWAY_HOSTNAME: "host-gateway"}
 
     async def destroy_sandbox(self, container_id: str) -> None:
         logger.info("Destroying scan container %s", container_id)

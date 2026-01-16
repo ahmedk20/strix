@@ -63,6 +63,116 @@ Screen {
     margin: 0;
 }
 
+#vulnerabilities_panel {
+    height: auto;
+    max-height: 12;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    border: round #333333;
+    overflow-y: auto;
+    scrollbar-background: #000000;
+    scrollbar-color: #333333;
+    scrollbar-corner-color: #000000;
+    scrollbar-size-vertical: 1;
+}
+
+#vulnerabilities_panel.hidden {
+    display: none;
+}
+
+.vuln-item {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+    background: transparent;
+    color: #d4d4d4;
+}
+
+.vuln-item:hover {
+    background: #1a1a1a;
+    color: #fafaf9;
+}
+
+VulnerabilityDetailScreen {
+    align: center middle;
+    background: #000000 80%;
+}
+
+#vuln_detail_dialog {
+    grid-size: 1;
+    grid-gutter: 1;
+    grid-rows: 1fr auto;
+    padding: 2 3;
+    width: 85%;
+    max-width: 110;
+    height: 85%;
+    max-height: 45;
+    border: solid #262626;
+    background: #0a0a0a;
+}
+
+#vuln_detail_scroll {
+    height: 1fr;
+    background: transparent;
+    scrollbar-background: #0a0a0a;
+    scrollbar-color: #404040;
+    scrollbar-corner-color: #0a0a0a;
+    scrollbar-size: 1 1;
+    padding-right: 1;
+}
+
+#vuln_detail_content {
+    width: 100%;
+    background: transparent;
+    padding: 0;
+}
+
+#vuln_detail_buttons {
+    width: 100%;
+    height: auto;
+    align: right middle;
+    padding-top: 1;
+    margin: 0;
+    border-top: solid #1a1a1a;
+}
+
+#copy_vuln_detail {
+    width: auto;
+    min-width: 12;
+    height: auto;
+    background: transparent;
+    color: #525252;
+    border: none;
+    text-style: none;
+    margin: 0 1;
+    padding: 0 2;
+}
+
+#close_vuln_detail {
+    width: auto;
+    min-width: 10;
+    height: auto;
+    background: transparent;
+    color: #a3a3a3;
+    border: none;
+    text-style: none;
+    margin: 0;
+    padding: 0 2;
+}
+
+#copy_vuln_detail:hover, #copy_vuln_detail:focus {
+    background: transparent;
+    color: #22c55e;
+    border: none;
+}
+
+#close_vuln_detail:hover, #close_vuln_detail:focus {
+    background: transparent;
+    color: #ffffff;
+    border: none;
+}
+
 #chat_area_container {
     width: 75%;
     background: transparent;
@@ -103,7 +213,7 @@ Screen {
     color: #a3a3a3;
     text-align: left;
     content-align: left middle;
-    text-style: italic;
+    text-style: none;
     margin: 0;
     padding: 0;
 }
@@ -216,9 +326,8 @@ Screen {
 }
 
 .tool-call {
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
     padding: 0 1;
     background: transparent;
     border: none;
@@ -227,24 +336,21 @@ Screen {
 
 .tool-call.status-completed {
     background: transparent;
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
 }
 
 .tool-call.status-running {
     background: transparent;
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
 }
 
 .tool-call.status-failed,
 .tool-call.status-error {
     background: transparent;
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
 }
 
 .browser-tool,
@@ -256,13 +362,17 @@ Screen {
 .notes-tool,
 .thinking-tool,
 .web-search-tool,
-.finish-tool,
-.reporting-tool,
 .scan-info-tool,
 .subagent-info-tool {
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
+    background: transparent;
+}
+
+.finish-tool,
+.reporting-tool {
+    margin-top: 1;
+    margin-bottom: 0;
     background: transparent;
 }
 
@@ -284,18 +394,22 @@ Screen {
 .thinking-tool.status-running,
 .web-search-tool.status-completed,
 .web-search-tool.status-running,
-.finish-tool.status-completed,
-.finish-tool.status-running,
-.reporting-tool.status-completed,
-.reporting-tool.status-running,
 .scan-info-tool.status-completed,
 .scan-info-tool.status-running,
 .subagent-info-tool.status-completed,
 .subagent-info-tool.status-running {
     background: transparent;
-    margin: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.finish-tool.status-completed,
+.finish-tool.status-running,
+.reporting-tool.status-completed,
+.reporting-tool.status-running {
+    background: transparent;
+    margin-top: 1;
+    margin-bottom: 0;
 }
 
 Tree {

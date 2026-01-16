@@ -6,7 +6,6 @@ Strix Agent Interface
 import argparse
 import asyncio
 import logging
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -18,9 +17,14 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from strix.interface.cli import run_cli
-from strix.interface.tui import run_tui
-from strix.interface.utils import (
+from strix.config import Config, apply_saved_config, save_current_config
+
+
+apply_saved_config()
+
+from strix.interface.cli import run_cli  # noqa: E402
+from strix.interface.tui import run_tui  # noqa: E402
+from strix.interface.utils import (  # noqa: E402
     assign_workspace_subdirs,
     build_final_stats_text,
     check_docker_connection,
@@ -30,10 +34,12 @@ from strix.interface.utils import (
     image_exists,
     infer_target_type,
     process_pull_line,
+    rewrite_localhost_targets,
     validate_llm_response,
 )
-from strix.runtime.docker_runtime import STRIX_IMAGE
-from strix.telemetry.tracer import get_global_tracer
+from strix.runtime.docker_runtime import HOST_GATEWAY_HOSTNAME  # noqa: E402
+from strix.telemetry import posthog  # noqa: E402
+from strix.telemetry.tracer import get_global_tracer  # noqa: E402
 
 
 logging.getLogger().setLevel(logging.ERROR)
@@ -44,26 +50,29 @@ def validate_environment() -> None:  # noqa: PLR0912, PLR0915
     missing_required_vars = []
     missing_optional_vars = []
 
-    if not os.getenv("STRIX_LLM"):
+    if not Config.get("strix_llm"):
         missing_required_vars.append("STRIX_LLM")
 
     has_base_url = any(
         [
-            os.getenv("LLM_API_BASE"),
-            os.getenv("OPENAI_API_BASE"),
-            os.getenv("LITELLM_BASE_URL"),
-            os.getenv("OLLAMA_API_BASE"),
+            Config.get("llm_api_base"),
+            Config.get("openai_api_base"),
+            Config.get("litellm_base_url"),
+            Config.get("ollama_api_base"),
         ]
     )
 
-    if not os.getenv("LLM_API_KEY"):
+    if not Config.get("llm_api_key"):
         missing_optional_vars.append("LLM_API_KEY")
 
     if not has_base_url:
         missing_optional_vars.append("LLM_API_BASE")
 
-    if not os.getenv("PERPLEXITY_API_KEY"):
+    if not Config.get("perplexity_api_key"):
         missing_optional_vars.append("PERPLEXITY_API_KEY")
+
+    if not Config.get("strix_reasoning_effort"):
+        missing_optional_vars.append("STRIX_REASONING_EFFORT")
 
     if missing_required_vars:
         error_text = Text()
@@ -116,6 +125,14 @@ def validate_environment() -> None:  # noqa: PLR0912, PLR0915
                         " - API key for Perplexity AI web search (enables real-time research)\n",
                         style="white",
                     )
+                elif var == "STRIX_REASONING_EFFORT":
+                    error_text.append("• ", style="white")
+                    error_text.append("STRIX_REASONING_EFFORT", style="bold cyan")
+                    error_text.append(
+                        " - Reasoning effort level: none, minimal, low, medium, high, xhigh "
+                        "(default: high)\n",
+                        style="white",
+                    )
 
         error_text.append("\nExample setup:\n", style="white")
         error_text.append("export STRIX_LLM='openai/gpt-5'\n", style="dim white")
@@ -137,6 +154,11 @@ def validate_environment() -> None:  # noqa: PLR0912, PLR0915
                 elif var == "PERPLEXITY_API_KEY":
                     error_text.append(
                         "export PERPLEXITY_API_KEY='your-perplexity-key-here'\n", style="dim white"
+                    )
+                elif var == "STRIX_REASONING_EFFORT":
+                    error_text.append(
+                        "export STRIX_REASONING_EFFORT='high'\n",
+                        style="dim white",
                     )
 
         panel = Panel(
@@ -180,13 +202,13 @@ async def warm_up_llm() -> None:
     console = Console()
 
     try:
-        model_name = os.getenv("STRIX_LLM", "openai/gpt-5")
-        api_key = os.getenv("LLM_API_KEY")
+        model_name = Config.get("strix_llm")
+        api_key = Config.get("llm_api_key")
         api_base = (
-            os.getenv("LLM_API_BASE")
-            or os.getenv("OPENAI_API_BASE")
-            or os.getenv("LITELLM_BASE_URL")
-            or os.getenv("OLLAMA_API_BASE")
+            Config.get("llm_api_base")
+            or Config.get("openai_api_base")
+            or Config.get("litellm_base_url")
+            or Config.get("ollama_api_base")
         )
 
         test_messages = [
@@ -194,7 +216,7 @@ async def warm_up_llm() -> None:
             {"role": "user", "content": "Reply with just 'OK'."},
         ]
 
-        llm_timeout = int(os.getenv("LLM_TIMEOUT", "600"))
+        llm_timeout = int(Config.get("llm_timeout") or "300")
 
         completion_kwargs: dict[str, Any] = {
             "model": model_name,
@@ -313,12 +335,6 @@ Examples:
     )
 
     parser.add_argument(
-        "--run-name",
-        type=str,
-        help="Custom name for this penetration test run",
-    )
-
-    parser.add_argument(
         "-n",
         "--non-interactive",
         action="store_true",
@@ -377,6 +393,7 @@ Examples:
             parser.error(f"Invalid target '{target}'")
 
     assign_workspace_subdirs(args.targets_info)
+    rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
 
     return args
 
@@ -453,11 +470,11 @@ def pull_docker_image() -> None:
     console = Console()
     client = check_docker_connection()
 
-    if image_exists(client, STRIX_IMAGE):
+    if image_exists(client, Config.get("strix_image")):  # type: ignore[arg-type]
         return
 
     console.print()
-    console.print(f"[bold cyan]🐳 Pulling Docker image:[/] {STRIX_IMAGE}")
+    console.print(f"[bold cyan]🐳 Pulling Docker image:[/] {Config.get('strix_image')}")
     console.print("[dim yellow]This only happens on first run and may take a few minutes...[/]")
     console.print()
 
@@ -466,7 +483,7 @@ def pull_docker_image() -> None:
             layers_info: dict[str, str] = {}
             last_update = ""
 
-            for line in client.api.pull(STRIX_IMAGE, stream=True, decode=True):
+            for line in client.api.pull(Config.get("strix_image"), stream=True, decode=True):
                 last_update = process_pull_line(line, layers_info, status, last_update)
 
         except DockerException as e:
@@ -475,7 +492,7 @@ def pull_docker_image() -> None:
             error_text.append("❌ ", style="bold red")
             error_text.append("FAILED TO PULL IMAGE", style="bold red")
             error_text.append("\n\n", style="white")
-            error_text.append(f"Could not download: {STRIX_IMAGE}\n", style="white")
+            error_text.append(f"Could not download: {Config.get('strix_image')}\n", style="white")
             error_text.append(str(e), style="dim red")
 
             panel = Panel(
@@ -507,8 +524,9 @@ def main() -> None:
     validate_environment()
     asyncio.run(warm_up_llm())
 
-    if not args.run_name:
-        args.run_name = generate_run_name(args.targets_info)
+    save_current_config()
+
+    args.run_name = generate_run_name(args.targets_info)
 
     for target_info in args.targets_info:
         if target_info["type"] == "repository":
@@ -519,10 +537,32 @@ def main() -> None:
 
     args.local_sources = collect_local_sources(args.targets_info)
 
-    if args.non_interactive:
-        asyncio.run(run_cli(args))
-    else:
-        asyncio.run(run_tui(args))
+    is_whitebox = bool(args.local_sources)
+
+    posthog.start(
+        model=Config.get("strix_llm"),
+        scan_mode=args.scan_mode,
+        is_whitebox=is_whitebox,
+        interactive=not args.non_interactive,
+        has_instructions=bool(args.instruction),
+    )
+
+    exit_reason = "user_exit"
+    try:
+        if args.non_interactive:
+            asyncio.run(run_cli(args))
+        else:
+            asyncio.run(run_tui(args))
+    except KeyboardInterrupt:
+        exit_reason = "interrupted"
+    except Exception as e:
+        exit_reason = "error"
+        posthog.error("unhandled_exception", str(e))
+        raise
+    finally:
+        tracer = get_global_tracer()
+        if tracer:
+            posthog.end(tracer, exit_reason=exit_reason)
 
     results_path = Path("strix_runs") / args.run_name
     display_completion_message(args, results_path)

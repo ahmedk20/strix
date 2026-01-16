@@ -111,7 +111,6 @@ hiddenimports = [
     'strix.llm.llm',
     'strix.llm.config',
     'strix.llm.utils',
-    'strix.llm.request_queue',
     'strix.llm.memory_compressor',
     'strix.runtime',
     'strix.runtime.runtime',
@@ -122,7 +121,7 @@ hiddenimports = [
     'strix.tools.registry',
     'strix.tools.executor',
     'strix.tools.argument_parser',
-    'strix.prompts',
+    'strix.skills',
 ]
 
 hiddenimports += collect_submodules('litellm')
