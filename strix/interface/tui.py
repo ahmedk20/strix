@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import atexit
 import logging
-import random
 import signal
 import sys
 import threading
@@ -18,7 +17,6 @@ if TYPE_CHECKING:
 from rich.align import Align
 from rich.console import Group
 from rich.panel import Panel
-from rich.spinner import SPINNERS
 from rich.style import Style
 from rich.text import Text
 from textual import events, on
@@ -31,7 +29,7 @@ from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
 from strix.agents.StrixAgent import StrixAgent
-from strix.interface.utils import build_live_stats_text
+from strix.interface.utils import build_tui_stats_text
 from strix.llm.config import LLMConfig
 from strix.telemetry.tracer import Tracer, set_global_tracer
 
@@ -252,6 +250,373 @@ class StopAgentScreen(ModalScreen):  # type: ignore[misc]
             self.app.pop_screen()
 
 
+class VulnerabilityDetailScreen(ModalScreen):  # type: ignore[misc]
+    """Modal screen to display vulnerability details."""
+
+    SEVERITY_COLORS: ClassVar[dict[str, str]] = {
+        "critical": "#dc2626",  # Red
+        "high": "#ea580c",  # Orange
+        "medium": "#d97706",  # Amber
+        "low": "#22c55e",  # Green
+        "info": "#3b82f6",  # Blue
+    }
+
+    FIELD_STYLE: ClassVar[str] = "bold #4ade80"
+
+    def __init__(self, vulnerability: dict[str, Any]) -> None:
+        super().__init__()
+        self.vulnerability = vulnerability
+
+    def compose(self) -> ComposeResult:
+        content = self._render_vulnerability()
+        yield Grid(
+            VerticalScroll(Static(content, id="vuln_detail_content"), id="vuln_detail_scroll"),
+            Horizontal(
+                Button("Copy", variant="default", id="copy_vuln_detail"),
+                Button("Done", variant="default", id="close_vuln_detail"),
+                id="vuln_detail_buttons",
+            ),
+            id="vuln_detail_dialog",
+        )
+
+    def on_mount(self) -> None:
+        close_button = self.query_one("#close_vuln_detail", Button)
+        close_button.focus()
+
+    def _get_cvss_color(self, cvss_score: float) -> str:
+        if cvss_score >= 9.0:
+            return "#dc2626"
+        if cvss_score >= 7.0:
+            return "#ea580c"
+        if cvss_score >= 4.0:
+            return "#d97706"
+        if cvss_score >= 0.1:
+            return "#65a30d"
+        return "#6b7280"
+
+    def _highlight_python(self, code: str) -> Text:
+        try:
+            from pygments.lexers import PythonLexer
+            from pygments.styles import get_style_by_name
+
+            lexer = PythonLexer()
+            style = get_style_by_name("native")
+            colors = {
+                token: f"#{style_def['color']}" for token, style_def in style if style_def["color"]
+            }
+
+            text = Text()
+            for token_type, token_value in lexer.get_tokens(code):
+                if not token_value:
+                    continue
+                color = None
+                tt = token_type
+                while tt:
+                    if tt in colors:
+                        color = colors[tt]
+                        break
+                    tt = tt.parent
+                text.append(token_value, style=color)
+        except (ImportError, KeyError, AttributeError):
+            return Text(code)
+        else:
+            return text
+
+    def _render_vulnerability(self) -> Text:  # noqa: PLR0912, PLR0915
+        vuln = self.vulnerability
+        text = Text()
+
+        text.append("🐞 ")
+        text.append("Vulnerability Report", style="bold #ea580c")
+
+        agent_name = vuln.get("agent_name", "")
+        if agent_name:
+            text.append("\n\n")
+            text.append("Agent: ", style=self.FIELD_STYLE)
+            text.append(agent_name)
+
+        title = vuln.get("title", "")
+        if title:
+            text.append("\n\n")
+            text.append("Title: ", style=self.FIELD_STYLE)
+            text.append(title)
+
+        severity = vuln.get("severity", "")
+        if severity:
+            text.append("\n\n")
+            text.append("Severity: ", style=self.FIELD_STYLE)
+            severity_color = self.SEVERITY_COLORS.get(severity.lower(), "#6b7280")
+            text.append(severity.upper(), style=f"bold {severity_color}")
+
+        cvss_score = vuln.get("cvss")
+        if cvss_score is not None:
+            text.append("\n\n")
+            text.append("CVSS Score: ", style=self.FIELD_STYLE)
+            cvss_color = self._get_cvss_color(float(cvss_score))
+            text.append(str(cvss_score), style=f"bold {cvss_color}")
+
+        target = vuln.get("target", "")
+        if target:
+            text.append("\n\n")
+            text.append("Target: ", style=self.FIELD_STYLE)
+            text.append(target)
+
+        endpoint = vuln.get("endpoint", "")
+        if endpoint:
+            text.append("\n\n")
+            text.append("Endpoint: ", style=self.FIELD_STYLE)
+            text.append(endpoint)
+
+        method = vuln.get("method", "")
+        if method:
+            text.append("\n\n")
+            text.append("Method: ", style=self.FIELD_STYLE)
+            text.append(method)
+
+        cve = vuln.get("cve", "")
+        if cve:
+            text.append("\n\n")
+            text.append("CVE: ", style=self.FIELD_STYLE)
+            text.append(cve)
+
+        # CVSS breakdown
+        cvss_breakdown = vuln.get("cvss_breakdown", {})
+        if cvss_breakdown:
+            cvss_parts = []
+            if cvss_breakdown.get("attack_vector"):
+                cvss_parts.append(f"AV:{cvss_breakdown['attack_vector']}")
+            if cvss_breakdown.get("attack_complexity"):
+                cvss_parts.append(f"AC:{cvss_breakdown['attack_complexity']}")
+            if cvss_breakdown.get("privileges_required"):
+                cvss_parts.append(f"PR:{cvss_breakdown['privileges_required']}")
+            if cvss_breakdown.get("user_interaction"):
+                cvss_parts.append(f"UI:{cvss_breakdown['user_interaction']}")
+            if cvss_breakdown.get("scope"):
+                cvss_parts.append(f"S:{cvss_breakdown['scope']}")
+            if cvss_breakdown.get("confidentiality"):
+                cvss_parts.append(f"C:{cvss_breakdown['confidentiality']}")
+            if cvss_breakdown.get("integrity"):
+                cvss_parts.append(f"I:{cvss_breakdown['integrity']}")
+            if cvss_breakdown.get("availability"):
+                cvss_parts.append(f"A:{cvss_breakdown['availability']}")
+            if cvss_parts:
+                text.append("\n\n")
+                text.append("CVSS Vector: ", style=self.FIELD_STYLE)
+                text.append("/".join(cvss_parts), style="dim")
+
+        description = vuln.get("description", "")
+        if description:
+            text.append("\n\n")
+            text.append("Description", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append(description)
+
+        impact = vuln.get("impact", "")
+        if impact:
+            text.append("\n\n")
+            text.append("Impact", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append(impact)
+
+        technical_analysis = vuln.get("technical_analysis", "")
+        if technical_analysis:
+            text.append("\n\n")
+            text.append("Technical Analysis", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append(technical_analysis)
+
+        poc_description = vuln.get("poc_description", "")
+        if poc_description:
+            text.append("\n\n")
+            text.append("PoC Description", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append(poc_description)
+
+        poc_script_code = vuln.get("poc_script_code", "")
+        if poc_script_code:
+            text.append("\n\n")
+            text.append("PoC Code", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append_text(self._highlight_python(poc_script_code))
+
+        remediation_steps = vuln.get("remediation_steps", "")
+        if remediation_steps:
+            text.append("\n\n")
+            text.append("Remediation", style=self.FIELD_STYLE)
+            text.append("\n")
+            text.append(remediation_steps)
+
+        return text
+
+    def _get_markdown_report(self) -> str:  # noqa: PLR0912, PLR0915
+        """Get Markdown version of vulnerability report for clipboard."""
+        vuln = self.vulnerability
+        lines: list[str] = []
+
+        # Title
+        title = vuln.get("title", "Untitled Vulnerability")
+        lines.append(f"# {title}")
+        lines.append("")
+
+        # Metadata
+        if vuln.get("id"):
+            lines.append(f"**ID:** {vuln['id']}")
+        if vuln.get("severity"):
+            lines.append(f"**Severity:** {vuln['severity'].upper()}")
+        if vuln.get("timestamp"):
+            lines.append(f"**Found:** {vuln['timestamp']}")
+        if vuln.get("agent_name"):
+            lines.append(f"**Agent:** {vuln['agent_name']}")
+        if vuln.get("target"):
+            lines.append(f"**Target:** {vuln['target']}")
+        if vuln.get("endpoint"):
+            lines.append(f"**Endpoint:** {vuln['endpoint']}")
+        if vuln.get("method"):
+            lines.append(f"**Method:** {vuln['method']}")
+        if vuln.get("cve"):
+            lines.append(f"**CVE:** {vuln['cve']}")
+        if vuln.get("cvss") is not None:
+            lines.append(f"**CVSS:** {vuln['cvss']}")
+
+        # CVSS Vector
+        cvss_breakdown = vuln.get("cvss_breakdown", {})
+        if cvss_breakdown:
+            abbrevs = {
+                "attack_vector": "AV",
+                "attack_complexity": "AC",
+                "privileges_required": "PR",
+                "user_interaction": "UI",
+                "scope": "S",
+                "confidentiality": "C",
+                "integrity": "I",
+                "availability": "A",
+            }
+            parts = [
+                f"{abbrevs.get(k, k)}:{v}" for k, v in cvss_breakdown.items() if v and k in abbrevs
+            ]
+            if parts:
+                lines.append(f"**CVSS Vector:** {'/'.join(parts)}")
+
+        # Description
+        lines.append("")
+        lines.append("## Description")
+        lines.append("")
+        lines.append(vuln.get("description") or "No description provided.")
+
+        # Impact
+        if vuln.get("impact"):
+            lines.extend(["", "## Impact", "", vuln["impact"]])
+
+        # Technical Analysis
+        if vuln.get("technical_analysis"):
+            lines.extend(["", "## Technical Analysis", "", vuln["technical_analysis"]])
+
+        # Proof of Concept
+        if vuln.get("poc_description") or vuln.get("poc_script_code"):
+            lines.extend(["", "## Proof of Concept", ""])
+            if vuln.get("poc_description"):
+                lines.append(vuln["poc_description"])
+                lines.append("")
+            if vuln.get("poc_script_code"):
+                lines.append("```python")
+                lines.append(vuln["poc_script_code"])
+                lines.append("```")
+
+        # Code Analysis
+        if vuln.get("code_file") or vuln.get("code_diff"):
+            lines.extend(["", "## Code Analysis", ""])
+            if vuln.get("code_file"):
+                lines.append(f"**File:** {vuln['code_file']}")
+                lines.append("")
+            if vuln.get("code_diff"):
+                lines.append("**Changes:**")
+                lines.append("```diff")
+                lines.append(vuln["code_diff"])
+                lines.append("```")
+
+        # Remediation
+        if vuln.get("remediation_steps"):
+            lines.extend(["", "## Remediation", "", vuln["remediation_steps"]])
+
+        lines.append("")
+        return "\n".join(lines)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+            event.prevent_default()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "copy_vuln_detail":
+            markdown_text = self._get_markdown_report()
+            self.app.copy_to_clipboard(markdown_text)
+
+            copy_button = self.query_one("#copy_vuln_detail", Button)
+            copy_button.label = "Copied!"
+            self.set_timer(1.5, lambda: setattr(copy_button, "label", "Copy"))
+        elif event.button.id == "close_vuln_detail":
+            self.app.pop_screen()
+
+
+class VulnerabilityItem(Static):  # type: ignore[misc]
+    """A clickable vulnerability item."""
+
+    def __init__(self, label: Text, vuln_data: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(label, **kwargs)
+        self.vuln_data = vuln_data
+
+    def on_click(self, _event: events.Click) -> None:
+        """Handle click to open vulnerability detail."""
+        self.app.push_screen(VulnerabilityDetailScreen(self.vuln_data))
+
+
+class VulnerabilitiesPanel(VerticalScroll):  # type: ignore[misc]
+    """A scrollable panel showing found vulnerabilities with severity-colored dots."""
+
+    SEVERITY_COLORS: ClassVar[dict[str, str]] = {
+        "critical": "#dc2626",  # Red
+        "high": "#ea580c",  # Orange
+        "medium": "#d97706",  # Amber
+        "low": "#22c55e",  # Green
+        "info": "#3b82f6",  # Blue
+    }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._vulnerabilities: list[dict[str, Any]] = []
+
+    def compose(self) -> ComposeResult:
+        return []
+
+    def update_vulnerabilities(self, vulnerabilities: list[dict[str, Any]]) -> None:
+        """Update the list of vulnerabilities and re-render."""
+        if self._vulnerabilities == vulnerabilities:
+            return
+        self._vulnerabilities = list(vulnerabilities)
+        self._render_panel()
+
+    def _render_panel(self) -> None:
+        """Render the vulnerabilities panel content."""
+        for child in list(self.children):
+            if isinstance(child, VulnerabilityItem):
+                child.remove()
+
+        if not self._vulnerabilities:
+            return
+
+        for vuln in self._vulnerabilities:
+            severity = vuln.get("severity", "info").lower()
+            title = vuln.get("title", "Unknown Vulnerability")
+            color = self.SEVERITY_COLORS.get(severity, "#3b82f6")
+
+            label = Text()
+            label.append("● ", style=Style(color=color))
+            label.append(title, style=Style(color="#d4d4d4"))
+
+            item = VulnerabilityItem(label, vuln, classes="vuln-item")
+            self.mount(item)
+
+
 class QuitScreen(ModalScreen):  # type: ignore[misc]
     def compose(self) -> ComposeResult:
         yield Grid(
@@ -330,25 +695,18 @@ class StrixTUIApp(App):  # type: ignore[misc]
         self._scan_stop_event = threading.Event()
         self._scan_completed = threading.Event()
 
-        self._action_verbs = [
-            "Generating",
-            "Scanning",
-            "Analyzing",
-            "Hacking",
-            "Testing",
-            "Exploiting",
-            "Pwning",
-            "Loading",
-            "Running",
-            "Working",
-            "Strixing",
-            "Thinking",
-            "Reasoning",
+        self._spinner_frame_index: int = 0  # Current animation frame index
+        self._sweep_num_squares: int = 6  # Number of squares in sweep animation
+        self._sweep_colors: list[str] = [
+            "#000000",  # Dimmest (shows dot)
+            "#031a09",
+            "#052e16",
+            "#0d4a2a",
+            "#15803d",
+            "#22c55e",
+            "#4ade80",
+            "#86efac",  # Brightest
         ]
-        self._agent_verbs: dict[str, str] = {}  # agent_id -> current_verb
-        self._agent_verb_timers: dict[str, Any] = {}  # agent_id -> timer
-        self._spinner_frame_index: int = 0  # Current spinner frame index
-        self._spinner_frames: list[str] = list(SPINNERS["dots"]["frames"])  # Braille spinner frames
         self._dot_animation_timer: Any | None = None
 
         self._setup_cleanup_handlers()
@@ -440,7 +798,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
             stats_display = Static("", id="stats_display")
 
-            sidebar = Vertical(agents_tree, stats_display, id="sidebar")
+            vulnerabilities_panel = VulnerabilitiesPanel(id="vulnerabilities_panel")
+
+            sidebar = Vertical(agents_tree, vulnerabilities_panel, stats_display, id="sidebar")
 
             content_container.mount(chat_area_container)
             content_container.mount(sidebar)
@@ -532,6 +892,8 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         self._update_stats_display()
 
+        self._update_vulnerabilities_panel()
+
     def _update_agent_node(self, agent_id: str, agent_data: dict[str, Any]) -> bool:
         if agent_id not in self.agent_nodes:
             return False
@@ -556,13 +918,6 @@ class StrixTUIApp(App):  # type: ignore[misc]
             vuln_indicator = f" ({vuln_count})" if vuln_count > 0 else ""
             agent_name = f"{status_icon} {agent_name_raw}{vuln_indicator}"
 
-            if status == "running":
-                self._start_agent_verb_timer(agent_id)
-            elif status == "waiting":
-                self._stop_agent_verb_timer(agent_id)
-            else:
-                self._stop_agent_verb_timer(agent_id)
-
             if agent_node.label != agent_name:
                 agent_node.set_label(agent_name)
                 return True
@@ -576,7 +931,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
     def _get_chat_content(
         self,
-    ) -> tuple[Text | None, str | None]:
+    ) -> tuple[Any, str | None]:
         if not self.selected_agent_id:
             return self._get_chat_placeholder_content(
                 "Select an agent from the tree to see its activity.", "placeholder-no-agent"
@@ -634,15 +989,14 @@ class StrixTUIApp(App):  # type: ignore[misc]
         text.append(message)
         return text, f"chat-placeholder {placeholder_class}"
 
-    def _get_rendered_events_content(self, events: list[dict[str, Any]]) -> Text:
-        result = Text()
+    def _get_rendered_events_content(self, events: list[dict[str, Any]]) -> Any:
+        renderables: list[Any] = []
 
         if not events:
-            return result
+            return Text()
 
-        first = True
         for event in events:
-            content: Text | None = None
+            content: Any = None
 
             if event["type"] == "chat":
                 content = self._render_chat_content(event["data"])
@@ -650,53 +1004,65 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 content = self._render_tool_content_simple(event["data"])
 
             if content:
-                if not first:
-                    result.append("\n\n")
-                result.append_text(content)
-                first = False
+                if renderables:
+                    renderables.append(Text(""))
+                renderables.append(content)
 
         if self.selected_agent_id:
             streaming = self.tracer.get_streaming_content(self.selected_agent_id)
             if streaming:
                 streaming_text = self._render_streaming_content(streaming)
                 if streaming_text:
-                    if not first:
-                        result.append("\n\n")
-                    result.append_text(streaming_text)
+                    if renderables:
+                        renderables.append(Text(""))
+                    renderables.append(streaming_text)
 
-        return result
+        if not renderables:
+            return Text()
 
-    def _render_streaming_content(self, content: str) -> Text:
+        if len(renderables) == 1:
+            return renderables[0]
+
+        return Group(*renderables)
+
+    def _render_streaming_content(self, content: str) -> Any:
         from strix.interface.streaming_parser import parse_streaming_content
 
-        result = Text()
+        renderables: list[Any] = []
         segments = parse_streaming_content(content)
 
-        for i, segment in enumerate(segments):
-            if i > 0:
-                result.append("\n\n")
-
+        for segment in segments:
             if segment.type == "text":
                 from strix.interface.tool_components.agent_message_renderer import (
                     AgentMessageRenderer,
                 )
 
                 text_content = AgentMessageRenderer.render_simple(segment.content)
-                result.append_text(text_content)
+                if renderables:
+                    renderables.append(Text(""))
+                renderables.append(text_content)
 
             elif segment.type == "tool":
-                tool_text = self._render_streaming_tool(
+                tool_renderable = self._render_streaming_tool(
                     segment.tool_name or "unknown",
                     segment.args or {},
                     segment.is_complete,
                 )
-                result.append_text(tool_text)
+                if renderables:
+                    renderables.append(Text(""))
+                renderables.append(tool_renderable)
 
-        return result
+        if not renderables:
+            return Text()
+
+        if len(renderables) == 1:
+            return renderables[0]
+
+        return Group(*renderables)
 
     def _render_streaming_tool(
         self, tool_name: str, args: dict[str, str], is_complete: bool
-    ) -> Text:
+    ) -> Any:
         from strix.interface.tool_components.registry import get_tool_renderer
 
         tool_data = {
@@ -709,12 +1075,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
         renderer = get_tool_renderer(tool_name)
         if renderer:
             widget = renderer.render(tool_data)
-            renderable = widget.renderable
-            if isinstance(renderable, Text):
-                return renderable
-            text = Text()
-            text.append(str(renderable))
-            return text
+            return widget.renderable
 
         return self._render_default_streaming_tool(tool_name, args, is_complete)
 
@@ -746,9 +1107,14 @@ class StrixTUIApp(App):  # type: ignore[misc]
     ) -> tuple[Text | None, Text, bool]:
         status = agent_data.get("status", "running")
 
-        def keymap_text(msg: str) -> Text:
+        def keymap_styled(keys: list[tuple[str, str]]) -> Text:
             t = Text()
-            t.append(msg, style="dim")
+            for i, (key, action) in enumerate(keys):
+                if i > 0:
+                    t.append(" · ", style="dim")
+                t.append(key, style="white")
+                t.append(" ", style="dim")
+                t.append(action, style="dim")
             return t
 
         simple_statuses: dict[str, tuple[str, str]] = {
@@ -758,10 +1124,10 @@ class StrixTUIApp(App):  # type: ignore[misc]
         }
 
         if status in simple_statuses:
-            msg, km = simple_statuses[status]
+            msg, _ = simple_statuses[status]
             text = Text()
             text.append(msg)
-            return (text, keymap_text(km), False)
+            return (text, Text(), False)
 
         if status == "llm_failed":
             error_msg = agent_data.get("error_message", "")
@@ -771,20 +1137,25 @@ class StrixTUIApp(App):  # type: ignore[misc]
             else:
                 text.append("LLM request failed", style="red")
             self._stop_dot_animation()
-            return (text, keymap_text("Send message to retry"), False)
+            keymap = Text()
+            keymap.append("Send message to retry", style="dim")
+            return (text, keymap, False)
 
         if status == "waiting":
-            animated_text = self._get_animated_waiting_text(agent_id)
-            return (animated_text, keymap_text("Send message to resume"), True)
+            keymap = Text()
+            keymap.append("Send message to resume", style="dim")
+            return (Text(" "), keymap, False)
 
         if status == "running":
-            verb = (
-                self._get_agent_verb(agent_id)
-                if self._agent_has_real_activity(agent_id)
-                else "Initializing Agent"
-            )
-            animated_text = self._get_animated_verb_text(agent_id, verb)
-            return (animated_text, keymap_text("ESC to stop | CTRL-C to quit and save"), True)
+            if self._agent_has_real_activity(agent_id):
+                animated_text = Text()
+                animated_text.append_text(self._get_sweep_animation(self._sweep_colors))
+                animated_text.append("esc", style="white")
+                animated_text.append(" ", style="dim")
+                animated_text.append("stop", style="dim")
+                return (animated_text, keymap_styled([("ctrl-q", "quit")]), True)
+            animated_text = self._get_animated_verb_text(agent_id, "Initializing")
+            return (animated_text, keymap_styled([("ctrl-q", "quit")]), True)
 
         return (None, Text(), False)
 
@@ -835,7 +1206,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         stats_content = Text()
 
-        stats_text = build_live_stats_text(self.tracer, self.agent_config)
+        stats_text = build_tui_stats_text(self.tracer, self.agent_config)
         if stats_text:
             stats_content.append(stats_text)
 
@@ -849,53 +1220,89 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         self._safe_widget_operation(stats_display.update, stats_panel)
 
-    def _get_agent_verb(self, agent_id: str) -> str:
-        if agent_id not in self._agent_verbs:
-            self._agent_verbs[agent_id] = random.choice(self._action_verbs)  # nosec B311 # noqa: S311
-        return self._agent_verbs[agent_id]
-
-    def _start_agent_verb_timer(self, agent_id: str) -> None:
-        if agent_id not in self._agent_verb_timers:
-            self._agent_verb_timers[agent_id] = self.set_interval(
-                30.0, lambda: self._change_agent_action_verb(agent_id)
-            )
-
-    def _stop_agent_verb_timer(self, agent_id: str) -> None:
-        if agent_id in self._agent_verb_timers:
-            self._agent_verb_timers[agent_id].stop()
-            del self._agent_verb_timers[agent_id]
-
-    def _change_agent_action_verb(self, agent_id: str) -> None:
-        if agent_id not in self._agent_verbs:
-            self._agent_verbs[agent_id] = random.choice(self._action_verbs)  # nosec B311 # noqa: S311
+    def _update_vulnerabilities_panel(self) -> None:
+        """Update the vulnerabilities panel with current vulnerability data."""
+        try:
+            vuln_panel = self.query_one("#vulnerabilities_panel", VulnerabilitiesPanel)
+        except (ValueError, Exception):
             return
 
-        current_verb = self._agent_verbs[agent_id]
-        available_verbs = [verb for verb in self._action_verbs if verb != current_verb]
-        self._agent_verbs[agent_id] = random.choice(available_verbs)  # nosec B311 # noqa: S311
+        if not self._is_widget_safe(vuln_panel):
+            return
 
-        if self.selected_agent_id == agent_id:
-            self._update_agent_status_display()
+        vulnerabilities = self.tracer.vulnerability_reports
+
+        if not vulnerabilities:
+            self._safe_widget_operation(vuln_panel.add_class, "hidden")
+            return
+
+        enriched_vulns = []
+        for vuln in vulnerabilities:
+            enriched = dict(vuln)
+            report_id = vuln.get("id", "")
+            agent_name = self._get_agent_name_for_vulnerability(report_id)
+            if agent_name:
+                enriched["agent_name"] = agent_name
+            enriched_vulns.append(enriched)
+
+        self._safe_widget_operation(vuln_panel.remove_class, "hidden")
+        vuln_panel.update_vulnerabilities(enriched_vulns)
+
+    def _get_agent_name_for_vulnerability(self, report_id: str) -> str | None:
+        """Find the agent name that created a vulnerability report."""
+        for _exec_id, tool_data in list(self.tracer.tool_executions.items()):
+            if tool_data.get("tool_name") == "create_vulnerability_report":
+                result = tool_data.get("result", {})
+                if isinstance(result, dict) and result.get("report_id") == report_id:
+                    agent_id = tool_data.get("agent_id")
+                    if agent_id and agent_id in self.tracer.agents:
+                        name: str = self.tracer.agents[agent_id].get("name", "Unknown Agent")
+                        return name
+        return None
+
+    def _get_sweep_animation(self, color_palette: list[str]) -> Text:
+        text = Text()
+        num_squares = self._sweep_num_squares
+        num_colors = len(color_palette)
+
+        offset = num_colors - 1
+        max_pos = (num_squares - 1) + offset
+        total_range = max_pos + offset
+        cycle_length = total_range * 2
+        frame_in_cycle = self._spinner_frame_index % cycle_length
+
+        wave_pos = total_range - abs(total_range - frame_in_cycle)
+        sweep_pos = wave_pos - offset
+
+        dot_color = "#0a3d1f"
+
+        for i in range(num_squares):
+            dist = abs(i - sweep_pos)
+            color_idx = max(0, num_colors - 1 - dist)
+
+            if color_idx == 0:
+                text.append("·", style=Style(color=dot_color))
+            else:
+                color = color_palette[color_idx]
+                text.append("▪", style=Style(color=color))
+
+        text.append(" ")
+        return text
 
     def _get_animated_verb_text(self, agent_id: str, verb: str) -> Text:  # noqa: ARG002
         text = Text()
-        spinner_char = self._spinner_frames[self._spinner_frame_index % len(self._spinner_frames)]
-        text.append(spinner_char, style=Style(color="#22c55e"))
-        text.append(" ", style=Style(color="white"))
-        text.append(verb, style=Style(color="white"))
-        return text
-
-    def _get_animated_waiting_text(self, agent_id: str) -> Text:  # noqa: ARG002
-        text = Text()
-        spinner_char = self._spinner_frames[self._spinner_frame_index % len(self._spinner_frames)]
-        text.append(spinner_char, style=Style(color="#fbbf24"))
-        text.append(" ", style=Style(color="white"))
-        text.append("Waiting", style=Style(color="#fbbf24"))
+        sweep = self._get_sweep_animation(self._sweep_colors)
+        text.append_text(sweep)
+        parts = verb.split(" ", 1)
+        text.append(parts[0], style="white")
+        if len(parts) > 1:
+            text.append(" ", style="dim")
+            text.append(parts[1], style="dim")
         return text
 
     def _start_dot_animation(self) -> None:
         if self._dot_animation_timer is None:
-            self._dot_animation_timer = self.set_interval(0.05, self._animate_dots)
+            self._dot_animation_timer = self.set_interval(0.06, self._animate_dots)
 
     def _stop_dot_animation(self) -> None:
         if self._dot_animation_timer is not None:
@@ -910,9 +1317,12 @@ class StrixTUIApp(App):  # type: ignore[misc]
             status = agent_data.get("status", "running")
             if status in ["running", "waiting"]:
                 has_active_agents = True
-                self._spinner_frame_index = (self._spinner_frame_index + 1) % len(
-                    self._spinner_frames
-                )
+                num_colors = len(self._sweep_colors)
+                offset = num_colors - 1
+                max_pos = (self._sweep_num_squares - 1) + offset
+                total_range = max_pos + offset
+                cycle_length = total_range * 2
+                self._spinner_frame_index = (self._spinner_frame_index + 1) % cycle_length
                 self._update_agent_status_display()
 
         if not has_active_agents:
@@ -933,7 +1343,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 tool_name = tool_data.get("tool_name", "")
                 if tool_name not in initial_tools:
                     return True
-        return False
+
+        streaming = self.tracer.get_streaming_content(agent_id)
+        return bool(streaming and streaming.strip())
 
     def _agent_vulnerability_count(self, agent_id: str) -> int:
         count = 0
@@ -1049,9 +1461,6 @@ class StrixTUIApp(App):  # type: ignore[misc]
         vuln_count = self._agent_vulnerability_count(agent_id)
         vuln_indicator = f" ({vuln_count})" if vuln_count > 0 else ""
         agent_name = f"{status_icon} {agent_name_raw}{vuln_indicator}"
-
-        if status in ["running", "waiting"]:
-            self._start_agent_verb_timer(agent_id)
 
         try:
             if parent_id and parent_id in self.agent_nodes:
@@ -1171,7 +1580,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
         parent_node.allow_expand = True
         parent_node.expand()
 
-    def _render_chat_content(self, msg_data: dict[str, Any]) -> Text | None:
+    def _render_chat_content(self, msg_data: dict[str, Any]) -> Any:
         role = msg_data.get("role")
         content = msg_data.get("content", "")
         metadata = msg_data.get("metadata", {})
@@ -1185,17 +1594,18 @@ class StrixTUIApp(App):  # type: ignore[misc]
             return UserMessageRenderer.render_simple(content)
 
         if metadata.get("interrupted"):
-            result = self._render_streaming_content(content)
-            result.append("\n")
-            result.append("⚠ ", style="yellow")
-            result.append("Interrupted by user", style="yellow dim")
-            return result
+            streaming_result = self._render_streaming_content(content)
+            interrupted_text = Text()
+            interrupted_text.append("\n")
+            interrupted_text.append("⚠ ", style="yellow")
+            interrupted_text.append("Interrupted by user", style="yellow dim")
+            return Group(streaming_result, interrupted_text)
 
         from strix.interface.tool_components.agent_message_renderer import AgentMessageRenderer
 
         return AgentMessageRenderer.render_simple(content)
 
-    def _render_tool_content_simple(self, tool_data: dict[str, Any]) -> Text | None:
+    def _render_tool_content_simple(self, tool_data: dict[str, Any]) -> Any:
         tool_name = tool_data.get("tool_name", "Unknown Tool")
         args = tool_data.get("args", {})
         status = tool_data.get("status", "unknown")
@@ -1207,24 +1617,12 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         if renderer:
             widget = renderer.render(tool_data)
-            renderable = widget.renderable
-            if isinstance(renderable, Text):
-                return renderable
-            text = Text()
-            text.append(str(renderable))
-            return text
+            return widget.renderable
 
         text = Text()
 
-        if tool_name == "llm_error_details":
-            text.append("✗ LLM Request Failed", style="red")
-            if args.get("details"):
-                details = str(args["details"])
-                if len(details) > 300:
-                    details = details[:297] + "..."
-                text.append("\nDetails: ", style="dim")
-                text.append(details)
-            return text
+        if tool_name in ("llm_error_details", "sandbox_error_details"):
+            return self._render_error_details(text, tool_name, args)
 
         text.append("→ Using tool ")
         text.append(tool_name, style="bold blue")
@@ -1240,10 +1638,10 @@ class StrixTUIApp(App):  # type: ignore[misc]
         text.append(icon, style=style)
 
         if args:
-            for k, v in list(args.items())[:2]:
+            for k, v in list(args.items())[:5]:
                 str_v = str(v)
-                if len(str_v) > 80:
-                    str_v = str_v[:77] + "..."
+                if len(str_v) > 500:
+                    str_v = str_v[:497] + "..."
                 text.append("\n  ")
                 text.append(k, style="dim")
                 text.append(": ")
@@ -1251,12 +1649,27 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         if status in ["completed", "failed", "error"] and result:
             result_str = str(result)
-            if len(result_str) > 150:
-                result_str = result_str[:147] + "..."
+            if len(result_str) > 1000:
+                result_str = result_str[:997] + "..."
             text.append("\n")
             text.append("Result: ", style="bold")
             text.append(result_str)
 
+        return text
+
+    def _render_error_details(self, text: Any, tool_name: str, args: dict[str, Any]) -> Any:
+        if tool_name == "llm_error_details":
+            text.append("✗ LLM Request Failed", style="red")
+        else:
+            text.append("✗ Sandbox Initialization Failed", style="red")
+            if args.get("error"):
+                text.append(f"\n{args['error']}", style="bold red")
+        if args.get("details"):
+            details = str(args["details"])
+            if len(details) > 1000:
+                details = details[:997] + "..."
+            text.append("\nDetails: ", style="dim")
+            text.append(details)
         return text
 
     @on(Tree.NodeHighlighted)  # type: ignore[misc]
@@ -1388,12 +1801,14 @@ class StrixTUIApp(App):  # type: ignore[misc]
         self.push_screen(QuitScreen())
 
     def action_stop_selected_agent(self) -> None:
-        if (
-            self.show_splash
-            or not self.is_mounted
-            or len(self.screen_stack) > 1
-            or not self.selected_agent_id
-        ):
+        if self.show_splash or not self.is_mounted:
+            return
+
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+            return
+
+        if not self.selected_agent_id:
             return
 
         agent_name, should_stop = self._validate_agent_for_stopping()
@@ -1453,9 +1868,6 @@ class StrixTUIApp(App):  # type: ignore[misc]
             logging.exception(f"Failed to stop agent {agent_id}")
 
     def action_custom_quit(self) -> None:
-        for agent_id in list(self._agent_verb_timers.keys()):
-            self._stop_agent_verb_timer(agent_id)
-
         if self._scan_thread and self._scan_thread.is_alive():
             self._scan_stop_event.set()
 
