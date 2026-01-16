@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tools>
+  <tool name="subdomain_recon_execute">
+    <description>Execute subdomain discovery and HTTP probing workflow using subfinder and httpx.
+
+This tool chains two industry-standard reconnaissance tools:
+1. subfinder: Discovers subdomains using passive sources (Certificate Transparency, DNS databases)
+2. httpx: Probes discovered subdomains to identify active HTTP/HTTPS services
+
+Returns structured, token-efficient results suitable for further analysis or vulnerability scanning.
+
+Common use cases:
+- Initial reconnaissance phase of penetration testing
+- Asset discovery for bug bounty programs
+- Identifying active web applications on a target domain
+- Feeding results into vulnerability scanners (nuclei, nikto, etc.)
+</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Target domain to enumerate (e.g., "example.com"). Do not include protocol or subdomain.</description>
+      </parameter>
+      <parameter name="subfinder_timeout" type="integer" required="false">
+        <description>Timeout in seconds for subfinder execution (default: 60). Increase for large domains.</description>
+      </parameter>
+      <parameter name="httpx_timeout" type="integer" required="false">
+        <description>Timeout in seconds for httpx probing (default: 120). Increase for many subdomains.</description>
+      </parameter>
+      <parameter name="httpx_threads" type="integer" required="false">
+        <description>Number of concurrent httpx threads (default: 50). Higher = faster but more aggressive.</description>
+      </parameter>
+      <parameter name="httpx_ports" type="list[int]" required="false">
+        <description>Custom ports to probe (e.g., [80, 443, 8080, 8443]). If not specified, probes standard HTTP/HTTPS ports.</description>
+      </parameter>
+      <parameter name="output_format" type="string" required="false">
+        <description>Result detail level:
+- "summary" (default): Active URLs and status code breakdown - most token-efficient
+- "detailed": Includes titles, tech stack, content length - balanced
+- "full": Complete httpx output - use sparingly, can be very large</description>
+      </parameter>
+      <parameter name="include_inactive" type="boolean" required="false">
+        <description>Include subdomains that didn't respond to HTTP probes (default: false). Only applies to "full" output format.</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Response containing:
+- success: Boolean indicating workflow completion
+- domain: Target domain
+- subdomains_discovered: Total subdomains found by subfinder
+- active_hosts: Number of hosts responding to HTTP/HTTPS probes
+- active_urls: List of active URLs (summary format)
+- hosts: Detailed host information (detailed/full formats)
+- status_breakdown: Count of hosts by HTTP status code
+- technology_summary: Detected technologies (detailed format)
+- error: Error message if workflow failed</description>
+    </returns>
+    <notes>
+Important usage rules:
+1. TIMEOUT MANAGEMENT: subfinder typically completes in 30-60s for most domains.
+   httpx time scales with subdomain count (estimate 0.5-2s per subdomain).
+
+2. OUTPUT FORMAT SELECTION:
+   - Use "summary" for initial reconnaissance and token efficiency
+   - Use "detailed" when you need to prioritize targets by technology/title
+   - Use "full" only when you need complete data for downstream processing
+
+3. ERROR HANDLING:
+   - If subfinder fails, the tool returns immediately with an error
+   - If httpx fails, partial results (subfinder output) are still returned
+   - Empty results (no subdomains found) are not errors - check subdomains_discovered
+
+4. PERFORMANCE:
+   - subfinder is passive (safe, stealthy, no direct target interaction)
+   - httpx is active reconnaissance (creates HTTP requests to target)
+   - For large domains (&gt;100 subdomains), consider increasing httpx_timeout
+
+5. DOWNSTREAM WORKFLOWS:
+   - Pipe active URLs to nuclei for vulnerability scanning
+   - Use status_breakdown to identify interesting endpoints (401, 403, 500)
+   - Filter by technology for targeted exploitation
+
+6. TOOL AVAILABILITY:
+   - Requires subfinder and httpx installed in environment
+   - Both tools installed by default in Strix Docker container
+</notes>
+    <examples>
+# Basic reconnaissance
+&lt;function=subdomain_recon_execute&gt;
+&lt;parameter=domain&gt;example.com&lt;/parameter&gt;
+&lt;/function&gt;
+
+# Detailed scan with custom ports
+&lt;function=subdomain_recon_execute&gt;
+&lt;parameter=domain&gt;api.example.com&lt;/parameter&gt;
+&lt;parameter=httpx_ports&gt;[80, 443, 8080, 8443, 3000, 5000]&lt;/parameter&gt;
+&lt;parameter=output_format&gt;detailed&lt;/parameter&gt;
+&lt;/function&gt;
+
+# Large domain with increased timeouts
+&lt;function=subdomain_recon_execute&gt;
+&lt;parameter=domain&gt;bigcorp.com&lt;/parameter&gt;
+&lt;parameter=subfinder_timeout&gt;120&lt;/parameter&gt;
+&lt;parameter=httpx_timeout&gt;300&lt;/parameter&gt;
+&lt;parameter=httpx_threads&gt;100&lt;/parameter&gt;
+&lt;/function&gt;
+    </examples>
+  </tool>
+</tools>

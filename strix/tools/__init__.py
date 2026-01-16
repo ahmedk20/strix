@@ -39,6 +39,7 @@ if not SANDBOX_MODE:
     from .proxy import *  # noqa: F403
     from .python import *  # noqa: F403
     from .reporting import *  # noqa: F403
+    from .subdomain_recon import *  # noqa: F403
     from .terminal import *  # noqa: F403
     from .thinking import *  # noqa: F403
     from .todo import *  # noqa: F403
@@ -51,6 +52,7 @@ else:
     from .file_edit import *  # noqa: F403
     from .proxy import *  # noqa: F403
     from .python import *  # noqa: F403
+    from .subdomain_recon import *  # noqa: F403
     from .terminal import *  # noqa: F403
 
 __all__ = [
